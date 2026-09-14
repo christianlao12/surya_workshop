@@ -1,0 +1,212 @@
+# =============================================================================
+# Surya workshop — template fine-tuning config
+#
+# Five sections own all parameters:
+#   data      — what to load and how to align labels
+#   model     — backbone architecture, fine-tuning head, LoRA
+#   training  — optimization and augmentation hyperparameters
+#   output    — where to save checkpoints (and optional S3 upload)
+#   logging   — experiment tracking (WandB)
+#
+# Two things to know before editing:
+#
+#   * Paths are relative to THIS FILE's directory (~ and $ENV_VARS are expanded), so a
+#     fork works on any machine with no absolute paths to fix up. The one exception is
+#     s3_cache_dir — see its comment below.
+#   * Unrecognized keys are an ERROR, not a silent no-op. To add a task-specific key,
+#     add the field to your DataConfig subclass in configs.py first.
+#
+# Usage — --config defaults to this file, so the short form is enough:
+#   CUDA_VISIBLE_DEVICES=0,1 python -m downstream_apps.template.3_finetune_template_1D
+#
+# Per-run overrides that do not require editing this file:
+#   --max-epochs 5     --batch-size 4     --s3-cache-dir /scratch/$USER/cache
+#   --deterministic warn   (reproducible run; see training.deterministic below)
+# =============================================================================
+
+job_id: solar_flare_forecasting
+
+
+# -----------------------------------------------------------------------------
+# Data
+# -----------------------------------------------------------------------------
+data:
+  # -- Paths (relative to this file's directory) --
+  train_data_path: ../../../data/indices/surya_aws_s3_train.csv
+  valid_data_path: ../../../data/indices/surya_aws_s3_val.csv
+  scalers_path: ../assets/scalers.yaml
+
+  # -- Input channels and temporal sampling --
+  channels: [aia94, aia131, aia171, aia193, aia211, aia304, aia335, aia1600,
+             hmi_m, hmi_bx, hmi_by, hmi_bz, hmi_v]
+  time_delta_input_minutes: [0]   # Offsets (minutes) of input frames relative to reference timestep
+  time_delta_target_minutes: 60   # Step size (minutes) between forecast frames
+
+  # -- Downstream label alignment (flare catalog → Surya index) --
+  flare_index_path: ../data/hek_flare_catalog.csv
+  ds_time_column: start_time      # Column in the flare catalog used as the event timestamp
+  ds_time_tolerance: 4d           # Max allowed gap between catalog and Surya timestamps
+  ds_match_direction: forward     # "forward": use solar state *before* the flare (causal)
+
+  # -- Local data (only needed when the index contains relative local paths) --
+  # sdo_data_root_path: /path/to/sdo   # Prepended to relative local paths; ignored for s3://
+
+  # -- S3 (only needed when index contains s3:// paths) --
+  s3_anon: true                   # true for public buckets; false to use IAM credentials
+
+  # How S3 objects are read. Measured on one 13-channel SDO sample from
+  # s3://nasa-surya-bench (times are indicative, not a benchmark):
+  #
+  #   download    — fetch the whole file into s3_cache_dir, then open locally.
+  #                 ~9 s from a warm cache. Recommended, and the default.
+  #   simplecache — fsspec read-through cache into s3_cache_dir. ~29 s on a cold fetch.
+  #   stream      — read directly from S3, nothing written to disk, no cache dir needed.
+  #                 ~271 s — roughly 9x slower than just fetching the whole file, because
+  #                 HDF5 random access becomes many small ranged GETs. Use only when you
+  #                 cannot spare the disk.
+  s3_mode: download
+
+  # Local cache directory. REQUIRED unless s3_mode is "stream" — budget ~1 GB per unique
+  # timestep, so the right location depends on your machine's scratch space.
+  #
+  # Left null here on purpose: this file is checked in and shared, and an absolute path
+  # into one person's home is wrong for everyone else. Set it one of three ways
+  # (highest precedence first):
+  #
+  #   1. --s3-cache-dir /scratch/$USER/helio_cache   (per-run)
+  #   2. s3_cache_dir: /scratch/me/helio_cache       (here, in your own fork)
+  #   3. export SURYA_WS_CACHE_DIR=/scratch/me/helio_cache   (per-machine, config stays clean)
+  #
+  # If none is set and the index contains s3:// paths, the run fails immediately with a
+  # suggested path — not part-way through the first epoch. ~ and $ENV_VARS are expanded.
+  s3_cache_dir: null
+
+  # -- S3 transfer tuning --
+  # These control boto3's multipart download: how many threads download parts in
+  # parallel and how large each part is.  The right values depend on your network
+  # connection and where you are running (local machine vs. AWS EC2).
+  #
+  # To find the optimal values for your setup, run the benchmark script once
+  # against a representative SDO NetCDF file and copy the recommended settings here:
+  #
+  #   python -m workshop_infrastructure.benchmark_s3 s3://nasa-surya-bench/2011/01/20110131_0000.nc --anon --quick
+  #
+  # The script downloads sample data with several (concurrency, part_size) combinations
+  # and prints a throughput table.  A --quick run takes roughly 2-3 minutes;
+  # drop --quick for a broader 25-cell grid.
+  s3_boto3_max_concurrency: 4     # parallel download threads (benchmark default: 4)
+  s3_boto3_part_size_mb: 64       # part size in MB (benchmark default: 64)
+
+  # -- Development --
+  max_samples: 10                 # Cap dataset size for quick experiments (null = all samples)
+
+
+# -----------------------------------------------------------------------------
+# Model
+# -----------------------------------------------------------------------------
+model:
+  # -- Pretrained checkpoint (relative to this file; downloaded on first run if missing) --
+  pretrained_path: ../assets/surya.366m.v1.pt
+
+  # -- Backbone (Surya 366M defaults — match the pretrained checkpoint) --
+  img_size: 4096
+  patch_size: 16
+  in_channels: 13
+  embed_dim: 1280
+  depth: 10
+  spectral_blocks: 2
+  num_heads: 16
+  mlp_ratio: 4.0
+  drop_rate: 0.0
+  window_size: 2
+  dp_rank: 4
+  rpe: false
+  learned_flow: false
+  init_weights: false
+  checkpoint_layers: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+  ensemble: null
+  nglo: 1
+  time_embedding:
+    type: linear        # Options: linear | fourier | perceiver
+    n_queries: null     # Required for perceiver; unused otherwise
+    time_dim: 1         # Number of input timesteps (must match time_delta_input_minutes length)
+
+  # -- Fine-tuning head --
+  pooling: class_token  # Options: class_token | global_average | global_max | attention | transformer
+  penultimate_linear_layer: true
+  dropout: 0.2
+  freeze_backbone: false
+
+  # -- LoRA adapters --
+  use_lora: true
+  lora_config:
+    r: 8
+    lora_alpha: 8
+    lora_dropout: 0.1
+    bias: none
+    target_modules: [q_proj, v_proj, k_proj, out_proj, fc1, fc2]
+
+
+# -----------------------------------------------------------------------------
+# Training
+# -----------------------------------------------------------------------------
+training:
+  learning_rate: 0.0001
+  batch_size: 2         # Per-device batch size under DDP
+  max_epochs: 20        # Can be overridden with --max-epochs at the CLI
+  num_workers: 8        # DataLoader worker processes per device (use 0 to debug in-process)
+
+  # -- Reproducibility --
+  # Seeds Python, NumPy, torch, every DataLoader worker, and the shuffle order. Two runs
+  # of this file give the same numbers; change the seed to get a genuinely different run
+  # rather than incidental variation.
+  seed: 42
+
+  # How hard to insist on determinism. Passed straight to lightning.Trainer.
+  #   false  — no guarantees; two identical runs may differ. The default, chosen for
+  #            throughput. Measured on this template (1 epoch, max_samples: 10, one A100,
+  #            LoRA): 159 s with false vs 190 s with warn, about +20% of total wall time.
+  #            That total includes a fixed ~1.8 GB checkpoint load, so the overhead on the
+  #            compute itself is proportionally larger — budget more on long runs.
+  #   warn   — bit-identical wherever a deterministic CUDA kernel exists (which is the
+  #            whole model as shipped), and a warning naming the op where one does not.
+  #            Never blocks a run.
+  #   true   — hard guarantee: an op with no deterministic kernel raises instead.
+  #            NOTE: incompatible with model.learned_flow: true, which uses F.grid_sample
+  #            (no deterministic CUDA backward) — that combination will fail.
+  #
+  # >> Set this to "warn" whenever you need to tell whether a change in your results came
+  # >> from your edit or from run-to-run drift. With false, that comparison is not
+  # >> meaningful: this config gave 0.060782 and 0.051657 on two identical runs.
+  # >> For a one-off check you can leave this file alone and pass --deterministic warn.
+  deterministic: false
+
+  # Caveat worth stating plainly: this buys you REPRODUCIBILITY, not statistical
+  # significance. With max_samples: 10 and one epoch the number is still noise — it is
+  # just the *same* noise every time, so a change in it can be attributed to your edit.
+
+  # Task-specific
+  rollout_steps: 0
+  drop_hmi_probability: 0.0
+  use_latitude_in_learned_flow: false
+  dtype: float32        # Options: float32 | bfloat16
+
+
+# -----------------------------------------------------------------------------
+# Output
+# -----------------------------------------------------------------------------
+output:
+  ckpt_dir: checkpoints   # Local directory for saved checkpoints
+
+  # S3 upload of best checkpoint (set s3_bucket to enable; all three are used together)
+  s3_bucket: null         # e.g. my-ml-artifacts
+  s3_prefix: ""           # Key prefix (folder) within the bucket, e.g. flare/exp_001
+  s3_best_key: best.ckpt  # Stable object name; always points to the latest best checkpoint
+
+
+# -----------------------------------------------------------------------------
+# Logging
+# -----------------------------------------------------------------------------
+logging:
+  wandb_project: template_flare_regression
+  wandb_entity: null      # WandB team/org name; null to log to your personal account
