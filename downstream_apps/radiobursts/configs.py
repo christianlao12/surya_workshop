@@ -32,7 +32,7 @@ from workshop_infrastructure.configs import (  # re-exported for convenience
 class RadioBurstDataConfig(DataConfig):
     """DataConfig plus the flare-catalog alignment settings used by ``RadioBurstDSDataset``.
 
-    These four keys are what makes this app's ``data:`` section different from any other
+    These keys are what makes this app's ``data:`` section different from any other
     downstream task's. Swap them for your own when you fork.
     """
     # Path to the data folder
@@ -49,6 +49,9 @@ class RadioBurstDataConfig(DataConfig):
     ds_match_direction: str = "forward"
     # Column in catalog pointing to spectra file path
     ds_spectra_column: str = "window_start_file"
+    # Catalog columns holding per-burst diagnostic measurements, packed into a diagnostics
+    # regression target by RadioBurstDSDataset. None disables it.
+    ds_diagnostics_columns: list[str] | None = None
 
     # Only the folder is a standalone path needing the same relative-to-the-config-file
     # resolution as the base class's fields. ds_radioburst_index_file is deliberately

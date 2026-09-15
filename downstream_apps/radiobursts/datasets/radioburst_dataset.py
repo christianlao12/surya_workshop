@@ -35,6 +35,9 @@ class RadioBurstDSDataset(HelioNetCDFDataset):
             full catalog file) end up with identical statistics. Define this at the call site (see
             ``0_dataset_dataloader_template.ipynb``) to keep normalization logic out of the dataset
             class, mirroring ``label_transform`` in ``downstream_apps/template``.
+        ds_diagnostics_columns: Optional list of catalog column names holding per-burst diagnostic
+            measurements (e.g. ``["peak_amp", "energy", "f_centroid", "f_spread", "t_spread"]``) to
+            expose as a regression target. If ``None`` (default), no diagnostics tuple is returned.
     Raises:
         ValueError: If ``ds_flare_index_path`` is not provided, or if no overlap exists
             between the Surya and DS indices within the specified tolerance.
@@ -52,6 +55,7 @@ class RadioBurstDSDataset(HelioNetCDFDataset):
         ds_match_direction: Literal["forward", "backward", "nearest"] = "forward",
         ds_spectra_column: str | None = None,
         spectra_transform: Callable[[pd.Series], pd.Series] | None = None,
+        ds_diagnostics_columns: list[str] | None = None,
         # All HelioNetCDFDataset parameters (index_path, scalers, channels, s3_*, etc.)
         **kwargs,
     ):
@@ -70,7 +74,15 @@ class RadioBurstDSDataset(HelioNetCDFDataset):
             raise ValueError("ds_radioburst_folder_path and ds_radioburst_index_file must be provided for RadioBurstDSDataset")
         self.ds_radioburst_folder_path = Path(ds_radioburst_folder_path)
         self.ds_spectra_column = ds_spectra_column
+        self.ds_diagnostics_columns = ds_diagnostics_columns
         self.ds_index = pd.read_csv(self.ds_radioburst_folder_path / ds_radioburst_index_file)
+
+        if self.ds_diagnostics_columns is not None:
+            missing = set(self.ds_diagnostics_columns) - set(self.ds_index.columns)
+            if missing:
+                raise ValueError(
+                    f"ds_diagnostics_columns not found in catalog: {sorted(missing)}"
+                )
 
         self.ds_index["ds_index"] = pd.to_datetime(
             self.ds_index[ds_time_column]
@@ -146,18 +158,33 @@ class RadioBurstDSDataset(HelioNetCDFDataset):
 
         Returns:
             Dictionary containing:
-                forecast_0 (np.int64): Burst label from the ``burst`` column (1 = burst
+                burst (np.int64): Burst label from the ``burst`` column (1 = burst
                     window, 0 = quiet window).
-                forecast_1 (np.ndarray[float32]): Radio spectra loaded from the file named in
+                spectra (np.ndarray[float32]): Radio spectra loaded from the file named in
                     ``ds_spectra_column``, shape (n_timesteps, n_bins), with the ``time``
                     column dropped, and passed through ``spectra_transform`` if one was given
                     at construction time (raw flux values otherwise).
                 ds_index (str): ISO-format timestamp from the radioburst index.
+                diagnostics (np.ndarray[float32]): Only present when ``ds_diagnostics_columns``
+                    was given at construction time. Shape ``(len(ds_diagnostics_columns),)``.
+                    Per-burst diagnostic measurements (e.g. peak amplitude, energy, frequency
+                    centroid/spread, time spread) read from those catalog columns, in the given
+                    order, as a regression target. Returned as a single array (not a tuple) so
+                    the default ``DataLoader`` collate stacks samples into one ``(B, D)`` tensor
+                    instead of transposing into ``D`` separate length-``B`` tensors.
+                    ``NaN`` for quiet windows (``burst == 0``): the catalog has no burst to
+                    diagnose there, so these entries are undefined, not missing data to impute.
+                    Mask by ``burst`` before computing any loss over this target.
             When ``return_surya_stack=True``, also includes all keys from
             ``HelioNetCDFDataset.__getitem__`` (ts, time_delta_input, lead_time_delta, etc.).
         """
         sample = super().__getitem__(idx=idx) if self.return_surya_stack else {}
-        sample["forecast_0"] = np.int64(self.df_valid_indices.iloc[idx]["burst"])
-        sample["forecast_1"] = self.df_valid_indices.iloc[idx]["normalized_spectra"]
+        row = self.df_valid_indices.iloc[idx]
+        sample["burst"] = np.int64(row["burst"])
+        sample["spectra"] = row["normalized_spectra"]
+        if self.ds_diagnostics_columns is not None:
+            sample["diagnostics"] = np.array(
+                [row[col] for col in self.ds_diagnostics_columns], dtype=np.float32
+            )
         sample["ds_index"] = self.df_valid_indices["ds_index"].iloc[idx].isoformat()
         return sample

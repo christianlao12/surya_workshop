@@ -49,6 +49,8 @@ data:
   ds_time_tolerance: 12m           # Max allowed gap between catalog and Surya timestamps
   ds_match_direction: forward     # "forward": use solar state *before* the flare (causal)
   ds_spectra_column: window_start_file # Column in the radio burst catalog showing file
+  ds_diagnostics_columns: [peak_amp, energy, f_centroid, f_spread, t_spread]
+    # Catalog columns packed into the diagnostics regression target (per-burst diagnostics)
 
   # -- Local data (only needed when the index contains relative local paths) --
   # sdo_data_root_path: /path/to/sdo   # Prepended to relative local paths; ignored for s3://
