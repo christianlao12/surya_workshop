@@ -1,5 +1,5 @@
 """
-A simple linear regression model to be used as a baseline for flare forecasting.
+A simple linear regression model to be used as a baseline for radio burst forecasting.
 """
 
 import torch
@@ -35,13 +35,17 @@ def destandardize_channels(batch: dict, channel_order: list, scalers: dict) -> d
     return {**batch, "ts": x}
 
 
-class RegressionFlareModel(nn.Module):
-    def __init__(self, input_dim: int):
+class TwoStageBurstModel(nn.Module):
+    def __init__(self, input_dim: int, n_diagnostics: int):
         """
-        Initializes the RegressionFlareModel.
+        Initializes the TwoStageBurstModel.
 
         Args:
-            input_dim (int): The size of the input vector after channel and time dimensions are flattened.
+            input_dim (int): The size of the input vector after channel and time dimensions are
+                flattened. Since forward() concatenates spatial mean and std per channel/timestep,
+                this should equal 2 * C * T.
+            n_diagnostics (int): The size of the target of regression. This should equal 
+            len(ds_diagnostic_columns) from the config.
 
         Note:
             This model expects 'ts' in the batch dict to already be in **signum-log** space
@@ -50,9 +54,10 @@ class RegressionFlareModel(nn.Module):
             them here (e.g., via the preprocess_fn argument of FlareLightningModule).
         """
         super().__init__()
-        self.linear = nn.Linear(input_dim, 1)
+        self.classifier = nn.Linear(input_dim, 1)
+        self.regressor = nn.Linear(input_dim, n_diagnostics)
 
-    def forward(self, x: dict) -> torch.Tensor:
+    def forward(self, x: dict) -> dict:
         """
         Performs a forward pass through the model.
 
@@ -67,10 +72,17 @@ class RegressionFlareModel(nn.Module):
         """
         x = x["ts"]
 
-        # Collapse input stack spatially and take absolute value for strictly positive flare fluxes
-        x = x.abs().mean(dim=[3, 4])
+        # Collapse input stack spatially into per-channel/timestep mean and std. Signed mean is
+        # kept (rather than abs()) since sign is physically meaningful for HMI polarity; std
+        # captures spatial variability that a mean-only summary would discard.
+        mean = x.mean(dim=[3, 4])
+        std = x.std(dim=[3, 4])
+        x = torch.cat([mean, std], dim=1)
 
         # Rearrange in preparation for linear layer
         x = rearrange(x, "b c t -> b (c t)")
 
-        return self.linear(x)
+        burst_prob = torch.sigmoid(self.classifier(x))
+        diagnostics = self.regressor(x)
+
+        return {"burst_prob": burst_prob, "diagnostics": diagnostics}

@@ -1,9 +1,9 @@
 """
 pl_simple_baseline.py
 
-A minimal PyTorch Lightning wrapper for training a flare prediction model.
+A minimal PyTorch Lightning wrapper for training a radio burst prediction model.
 
-This module defines a single LightningModule (FlareLightningModule) that:
+This module defines a single LightningModule (RadioBurstLightningModule) that:
   - Calls a user-provided PyTorch model on batched inputs (batch["ts"])
   - Computes one or more training/validation losses via a user-provided loss function
   - Logs scalar losses and evaluation metrics using Lightning's built-in logging
