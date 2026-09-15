@@ -27,6 +27,14 @@ class RadioBurstDSDataset(HelioNetCDFDataset):
         ds_match_direction: Merge direction passed to ``pd.merge_asof``. Use ``"forward"``
             for causal prediction (predict flares from prior solar state).
         ds_spectra_column: Location of the file of the spectra of the radio burst in the data folder.
+        spectra_transform: Optional callable applied to the ``ds_spectra_column`` files (loaded and
+            stacked into a ``pd.Series`` of arrays) to produce the ``normalized_spectra`` column.
+            Signature: ``(spectra: pd.Series) -> pd.Series``. If ``None``, raw flux values are used
+            as-is. Applied once, over the full catalog, before it is matched/split against the
+            Surya index — so train and val ``RadioBurstDSDataset`` instances (each loading the same
+            full catalog file) end up with identical statistics. Define this at the call site (see
+            ``0_dataset_dataloader_template.ipynb``) to keep normalization logic out of the dataset
+            class, mirroring ``label_transform`` in ``downstream_apps/template``.
     Raises:
         ValueError: If ``ds_flare_index_path`` is not provided, or if no overlap exists
             between the Surya and DS indices within the specified tolerance.
@@ -43,6 +51,7 @@ class RadioBurstDSDataset(HelioNetCDFDataset):
         ds_time_tolerance: str | None = None,
         ds_match_direction: Literal["forward", "backward", "nearest"] = "forward",
         ds_spectra_column: str | None = None,
+        spectra_transform: Callable[[pd.Series], pd.Series] | None = None,
         # All HelioNetCDFDataset parameters (index_path, scalers, channels, s3_*, etc.)
         **kwargs,
     ):
@@ -67,6 +76,23 @@ class RadioBurstDSDataset(HelioNetCDFDataset):
             self.ds_index[ds_time_column]
         ).values.astype("datetime64[ns]")
         self.ds_index.sort_values("ds_index", inplace=True)
+
+        # Load every spectra file referenced by the full catalog and apply spectra_transform
+        # once, here, over the whole column - before the merge_asof split below narrows
+        # ds_index down to this particular phase's matched rows. Both the train and val
+        # RadioBurstDSDataset instances load and transform this same full catalog file, so
+        # they end up with identical statistics even though spectra_transform sees the
+        # entire (train + val) population - mirroring how label_transform is applied to
+        # FlareDSDataset's "intensity" column in downstream_apps/template.
+        raw_spectra = self.ds_index[ds_spectra_column].apply(
+            lambda p: pd.read_csv(self.ds_radioburst_folder_path / p)
+            .drop(columns="time")
+            .to_numpy(dtype=np.float32)
+        )
+        if spectra_transform is not None:
+            self.ds_index["normalized_spectra"] = spectra_transform(raw_spectra)
+        else:
+            self.ds_index["normalized_spectra"] = raw_spectra
 
         # Create Surya valid indices and find closest match to DS index
         self.df_valid_indices = pd.DataFrame(
@@ -124,15 +150,14 @@ class RadioBurstDSDataset(HelioNetCDFDataset):
                     window, 0 = quiet window).
                 forecast_1 (np.ndarray[float32]): Radio spectra loaded from the file named in
                     ``ds_spectra_column``, shape (n_timesteps, n_bins), with the ``time``
-                    column dropped.
+                    column dropped, and passed through ``spectra_transform`` if one was given
+                    at construction time (raw flux values otherwise).
                 ds_index (str): ISO-format timestamp from the radioburst index.
             When ``return_surya_stack=True``, also includes all keys from
             ``HelioNetCDFDataset.__getitem__`` (ts, time_delta_input, lead_time_delta, etc.).
         """
         sample = super().__getitem__(idx=idx) if self.return_surya_stack else {}
-        spectra_path = self.ds_radioburst_folder_path / self.df_valid_indices.iloc[idx][self.ds_spectra_column]
-        spectra_df = pd.read_csv(spectra_path)
         sample["forecast_0"] = np.int64(self.df_valid_indices.iloc[idx]["burst"])
-        sample["forecast_1"] = spectra_df.drop(columns="time").to_numpy(dtype=np.float32)
+        sample["forecast_1"] = self.df_valid_indices.iloc[idx]["normalized_spectra"]
         sample["ds_index"] = self.df_valid_indices["ds_index"].iloc[idx].isoformat()
         return sample
