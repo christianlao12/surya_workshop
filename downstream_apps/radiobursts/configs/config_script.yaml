@@ -24,7 +24,7 @@
 #   --deterministic warn   (reproducible run; see training.deterministic below)
 # =============================================================================
 
-job_id: solar_flare_forecasting
+job_id: radio_burst_forecasting
 
 
 # -----------------------------------------------------------------------------
@@ -43,10 +43,12 @@ data:
   time_delta_target_minutes: 60   # Step size (minutes) between forecast frames
 
   # -- Downstream label alignment (flare catalog → Surya index) --
-  flare_index_path: ../data/hek_flare_catalog.csv
-  ds_time_column: start_time      # Column in the flare catalog used as the event timestamp
-  ds_time_tolerance: 4d           # Max allowed gap between catalog and Surya timestamps
+  ds_radioburst_folder_path: /home/jovyan/scratch_space/clao/Data/
+  ds_radioburst_index_file: SuryaWorkshopIndex.csv
+  ds_time_column: window_start    # Column in the radio burst catalog used as the event timestamp
+  ds_time_tolerance: 12m           # Max allowed gap between catalog and Surya timestamps
   ds_match_direction: forward     # "forward": use solar state *before* the flare (causal)
+  ds_spectra_column: window_start_file # Column in the radio burst catalog showing file
 
   # -- Local data (only needed when the index contains relative local paths) --
   # sdo_data_root_path: /path/to/sdo   # Prepended to relative local paths; ignored for s3://
@@ -79,7 +81,7 @@ data:
   #
   # If none is set and the index contains s3:// paths, the run fails immediately with a
   # suggested path — not part-way through the first epoch. ~ and $ENV_VARS are expanded.
-  s3_cache_dir: null
+  s3_cache_dir: /home/jovyan/scratch_space/surya_cache/
 
   # -- S3 transfer tuning --
   # These control boto3's multipart download: how many threads download parts in
