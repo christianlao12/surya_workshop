@@ -29,34 +29,41 @@ from workshop_infrastructure.configs import (  # re-exported for convenience
 
 
 @dataclass
-class FlareDataConfig(DataConfig):
-    """DataConfig plus the flare-catalog alignment settings used by ``FlareDSDataset``.
+class RadioBurstDataConfig(DataConfig):
+    """DataConfig plus the flare-catalog alignment settings used by ``RadioBurstDSDataset``.
 
     These four keys are what makes this app's ``data:`` section different from any other
     downstream task's. Swap them for your own when you fork.
     """
-    # Path to the label catalog (relative paths resolve against the config file's dir).
-    flare_index_path: str = ""
+    # Path to the data folder
+    ds_radioburst_folder_path: str = ""
+    # Filename of the label catalog *inside* ds_radioburst_folder_path. Not a PATH_FIELD:
+    # RadioBurstDSDataset joins it onto ds_radioburst_folder_path itself, so resolving it
+    # independently here (relative to the config file's dir) would produce the wrong path.
+    ds_radioburst_index_file: str = ""
     # Column in the catalog holding the event timestamp.
-    ds_time_column: str = "start_time"
+    ds_time_column: str = "window_start"
     # Max allowed gap when matching catalog events to Surya timesteps.
-    ds_time_tolerance: str = "4d"
+    ds_time_tolerance: str = "1h"
     # "forward" uses the solar state *before* the flare (causal prediction).
     ds_match_direction: str = "forward"
+    # Column in catalog pointing to spectra file path
+    ds_spectra_column: str = "window_start_file"
 
-    # flare_index_path is a path, so it must join the base class's list to get the same
-    # relative-to-the-config-file resolution. Extend this whenever you add a path field.
-    PATH_FIELDS: ClassVar[tuple[str, ...]] = DataConfig.PATH_FIELDS + ("flare_index_path",)
+    # Only the folder is a standalone path needing the same relative-to-the-config-file
+    # resolution as the base class's fields. ds_radioburst_index_file is deliberately
+    # excluded (see comment above).
+    PATH_FIELDS: ClassVar[tuple[str, ...]] = DataConfig.PATH_FIELDS + ("ds_radioburst_folder_path",)
 
 
 # The app's entry point. Identical to load_config() except that the data: section is
 # parsed into FlareDataConfig, so the four keys above are recognized instead of rejected.
-load_flare_config = partial(load_config, data_cls=FlareDataConfig)
+load_radioburst_config = partial(load_config, data_cls=RadioBurstDataConfig)
 
 
 __all__ = [
-    "FlareDataConfig",
-    "load_flare_config",
+    "RadioBurstDataConfig",
+    "load_radioburst_config",
     # Re-exports so app code can import everything config-related from one place.
     "DataConfig",
     "OutputConfig",
