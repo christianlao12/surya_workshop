@@ -25,7 +25,7 @@ import torchmetrics as tm  # Lots of possible metrics in here https://lightning.
 class BurstMetrics:
     def __init__(self, mode: str, diagnostics_weight: float = 1.0):
         """
-        Initialize BurstsMetrics class.
+        Initialize BurstMetrics class.
 
         Args:
             mode (str): Mode to use for metric evaluation. One of "train_loss",
