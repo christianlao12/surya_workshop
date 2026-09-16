@@ -20,7 +20,13 @@ Key batch contract:
   - batch["diagnostics"] : torch.Tensor peak_amp regression target, shape [B, 1]
                             (narrowed via ds_diagnostics_columns: [peak_amp] in the
                             config); NaN in rows where burst == 0. Compared against the
-                            model's "peak_amp" output by BurstMetrics.
+                            linear baseline's "peak_amp" output by RadioBurstMetrics.
+  - batch["spectra"]     : torch.Tensor radio spectrogram target, shape [B, T, F].
+                            Compared against HelioSpectformerBurst's "spectra" output by
+                            RadioBurstSpectraMetrics.
+
+All three targets are passed to the metrics in one dict; each metrics class reads only the
+keys its model predicts.
 
 Optional preprocessing:
   - If ``preprocess_fn`` is provided to ``__init__``, it is called on the batch dict
@@ -59,7 +65,7 @@ Weights = Any  # often a list[float] or list[torch.Tensor]
 
 class RadioBurstLightningModule(L.LightningModule):
     """
-    PyTorch LightningModule for flare prediction training.
+    PyTorch LightningModule for radio-burst prediction training.
 
     This class wraps:
       (1) a user-provided PyTorch model (nn.Module-like) and
@@ -173,9 +179,9 @@ class RadioBurstLightningModule(L.LightningModule):
         --------
         1) Extract inputs and targets from the batch:
               x = batch["ts"]
-              target = {"burst": batch["burst"], "diagnostics": batch["diagnostics"]}
+              target = {"burst": batch["burst"], "diagnostics": batch["diagnostics"], "spectra": batch["spectra"]}
         2) Compute model output:
-              output = self(x)
+              output = self(batch)
         3) Compute per-component losses and combine via provided weights:
               training_losses, training_loss_weights = training_loss(output, target)
         4) Log:
@@ -185,12 +191,11 @@ class RadioBurstLightningModule(L.LightningModule):
 
         Notes
         -----
-        - `target` is a dict (`"burst"`, `"diagnostics"`); `output` is
-          `TwoStageBurstModel`'s dict (`"burst_prob"`, `"peak_amp"`, `"spectra"`).
-          Loss/metric callables (e.g. `BurstMetrics`) index into both by key rather than
-          operating on a single tensor — `target["diagnostics"]` (the peak_amp target) is
-          compared against `output["peak_amp"]`; `output["spectra"]` is currently unused
-          by any loss/metric.
+        - `target` is a dict (`"burst"`, `"diagnostics"`, `"spectra"`); `output` is the
+          model's dict. Loss/metric callables index into both by key rather than operating
+          on a single tensor: `RadioBurstMetrics` compares `output["peak_amp"]` with
+          `target["diagnostics"]` (linear baseline), `RadioBurstSpectraMetrics` compares
+          `output["spectra"]` with `target["spectra"]` (Surya fine-tuning head).
         - The loss combination depends on dict iteration order; ensure loss dict
           insertion order is consistent if that matters.
 
@@ -199,7 +204,7 @@ class RadioBurstLightningModule(L.LightningModule):
         torch.Tensor
             The scalar training loss used for backpropagation.
         """
-        target = {"burst": batch["burst"], "diagnostics": batch["diagnostics"]}
+        target = {"burst": batch["burst"], "diagnostics": batch["diagnostics"], "spectra": batch["spectra"]}
 
         if self.preprocess_fn is not None:
             batch = self.preprocess_fn(batch)
@@ -244,7 +249,7 @@ class RadioBurstLightningModule(L.LightningModule):
           of this method are reported only and do not affect checkpoint selection.
         - No value is returned (Lightning uses logs for validation tracking).
         """
-        target = {"burst": batch["burst"], "diagnostics": batch["diagnostics"]}
+        target = {"burst": batch["burst"], "diagnostics": batch["diagnostics"], "spectra": batch["spectra"]}
 
         if self.preprocess_fn is not None:
             batch = self.preprocess_fn(batch)

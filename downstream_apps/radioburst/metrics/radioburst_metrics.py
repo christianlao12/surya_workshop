@@ -1,39 +1,48 @@
 """
-Template metrics for flare forecasting.
+Metrics for the radio-burst downstream app.
 
-FlareMetrics defines four metric sets:
-- "train_loss"    — differentiable loss that drives backpropagation (MSE).
+Two classes, one per model:
+- RadioBurstMetrics         — for the linear baseline (TwoStageBurstModel): burst probability
+                              plus a scalar ``peak_amp``.
+- RadioBurstSpectraMetrics  — for the Surya fine-tuning head (HelioSpectformerBurst): burst
+                              logit plus a full (T, F) spectrogram.
+
+Both define four metric sets:
+- "train_loss"    — differentiable loss that drives backpropagation (burst BCE + masked MSE).
 - "val_loss"      — the quantity logged as `val_loss` and used to select checkpoints.
-                    Defaults to the same MSE as "train_loss"; override it when your task
+                    Defaults to the same loss as "train_loss"; override it when your task
                     needs a different validation objective.
-- "train_metrics" — non-differentiable metrics logged during training (RRSE).
-- "val_metrics"   — metrics logged at validation for reporting only (MSE + RRSE). These
-                    do NOT influence checkpoint selection — "val_loss" does.
+- "train_metrics" — non-differentiable metrics logged during training (F1 + RRSE).
+- "val_metrics"   — metrics logged at validation for reporting only (F1 + MSE + RRSE).
+                    These do NOT influence checkpoint selection — "val_loss" does.
 
 The __call__ method selects the appropriate metric set based on the mode passed at
 construction time. The dictionary keys returned by each method become the metric names
 propagated to the logger (e.g. WandB, CSV).
 
-The regression target throughout is a single scalar, ``peak_amp`` — the amplitude
+The regression terms are masked to burst rows (``target["burst"] == 1``): quiet windows
+only train the classifier. Non-finite target cells (missing measurements) are skipped too.
+
+RadioBurstMetrics' regression target is a single scalar, ``peak_amp`` — the amplitude
 TwoStageBurstModel regresses to scale its median spectrogram template
-(``downstream_apps/radioburst/models/simple_baseline.py``) — not a multi-column
-diagnostics vector. It arrives as ``target["diagnostics"]``, shape ``(B, 1)``: that key
-name is owned by ``RadioBurstDSDataset.__getitem__`` and is unchanged here, but it only
-holds ``peak_amp`` now, by convention of ``ds_diagnostics_columns: [peak_amp]`` in the
-config. Predictions arrive as ``preds["peak_amp"]``.
+(``downstream_apps/radioburst/models/simple_baseline.py``). It arrives as
+``target["diagnostics"]``, shape ``(B, 1)``: that key name is owned by
+``RadioBurstDSDataset.__getitem__``, but it only holds ``peak_amp``, by convention of
+``ds_diagnostics_columns: [peak_amp]`` in the config.
+
+RadioBurstSpectraMetrics' regression target is ``target["spectra"]``, shape ``(B, T, F)``.
 """
 
 import torch
 import torchmetrics as tm  # Lots of possible metrics in here https://lightning.ai/docs/torchmetrics/stable/all-metrics.html
 
-# Shape contract: predictions arrive as (B,) from HelioSpectformer1D or (B, 1) from the
-# linear baseline, while targets are always (B, 1). Every metric below flattens both with
+# Shape contract: scalar predictions and targets are (B, 1). Every metric below flattens with
 # reshape(-1) rather than squeeze(-1): squeeze is shape-dependent and collapses a
 # batch of one to a 0-d scalar, which then fails to broadcast against a (1,) target.
-class BurstMetrics:
+class RadioBurstMetrics:
     def __init__(self, mode: str, peak_amp_weight: float = 1.0):
         """
-        Initialize BurstMetrics class.
+        Initialize RadioBurstMetrics class.
 
         Args:
             mode (str): Mode to use for metric evaluation. One of "train_loss",
@@ -59,24 +68,31 @@ class BurstMetrics:
     def _burst_mask(self, burst_target: torch.Tensor) -> torch.Tensor:
         return burst_target.reshape(-1).bool()
 
-    def _masked_peak_amp_mse(self, peak_amp_pred, peak_amp_target, burst_target):
-        mask = self._burst_mask(burst_target)
-        if mask.sum() == 0:
-            return torch.zeros((), device=peak_amp_pred.device)
-        else:
-            return torch.nn.functional.mse_loss(peak_amp_pred[mask], peak_amp_target[mask])
+    def _masked_values(self, pred, target, burst_target):
+        """Flattened (pred, target) over burst rows and finite target cells only.
 
-    def _masked_peak_amp_rrse(self, peak_amp_pred, peak_amp_target, burst_target):
+        Works for any per-sample shape: (B, 1) peak_amp, (B, T, F) spectra. Non-finite
+        targets are missing measurements (e.g. gaps in a spectrogram) and are skipped
+        rather than filled.
+        """
         mask = self._burst_mask(burst_target)
-        if mask.sum() == 0:
-            return torch.zeros((), device=peak_amp_pred.device)
-        else:
-            # _rrse is a stateful, single-output (num_outputs=1) torchmetrics instance, so
-            # both sides are flattened to a single stream — matching _masked_peak_amp_mse's
-            # all-elements reduction — rather than left as (N, 1), which torchmetrics would
-            # try to accumulate into a (1,) state per column anyway; reshape just makes that
-            # explicit.
-            return self._rrse(peak_amp_pred[mask].reshape(-1), peak_amp_target[mask].reshape(-1))
+        pred, target = pred[mask], target[mask]
+        finite = torch.isfinite(target)
+        return pred[finite], target[finite]
+
+    def _masked_mse(self, pred, target, burst_target):
+        pred, target = self._masked_values(pred, target, burst_target)
+        if target.numel() == 0:
+            return torch.zeros((), device=pred.device)
+        return torch.nn.functional.mse_loss(pred, target)
+
+    def _masked_rrse(self, pred, target, burst_target):
+        pred, target = self._masked_values(pred, target, burst_target)
+        if target.numel() == 0:
+            return torch.zeros((), device=pred.device)
+        # _rrse is a stateful, single-output torchmetrics instance, so it is fed one
+        # flattened stream, matching _masked_mse's all-elements reduction.
+        return self._rrse(pred, target)
 
 
     def train_loss(
@@ -108,7 +124,7 @@ class BurstMetrics:
         )
         output_weights.append(1.0)
 
-        output_metrics["mse_peak_amp"] = self._masked_peak_amp_mse(
+        output_metrics["mse_peak_amp"] = self._masked_mse(
             preds["peak_amp"], target["diagnostics"], target["burst"]
         )
         output_weights.append(self.peak_amp_weight)
@@ -167,7 +183,7 @@ class BurstMetrics:
         output_metrics["f1"] = self._f1(preds["burst_prob"].reshape(-1), target["burst"].reshape(-1).int())
         output_weights.append(1)
 
-        output_metrics["rrse"] = self._masked_peak_amp_rrse(preds["peak_amp"], target["diagnostics"], target["burst"])
+        output_metrics["rrse"] = self._masked_rrse(preds["peak_amp"], target["diagnostics"], target["burst"])
         output_weights.append(1)
 
 
@@ -198,10 +214,10 @@ class BurstMetrics:
         output_metrics["f1"] = self._f1(preds["burst_prob"].reshape(-1), target["burst"].reshape(-1).int())
         output_weights.append(1)
 
-        output_metrics["mse"] = self._masked_peak_amp_mse(preds["peak_amp"], target["diagnostics"], target["burst"])
+        output_metrics["mse"] = self._masked_mse(preds["peak_amp"], target["diagnostics"], target["burst"])
         output_weights.append(1)
 
-        output_metrics["rrse"] = self._masked_peak_amp_rrse(preds["peak_amp"], target["diagnostics"], target["burst"])
+        output_metrics["rrse"] = self._masked_rrse(preds["peak_amp"], target["diagnostics"], target["burst"])
         output_weights.append(1)
 
         return output_metrics, output_weights
@@ -219,7 +235,7 @@ class BurstMetrics:
             tuple[dict[str, torch.Tensor], list[float]]:
                 - Metric dictionary. Keys become logger metric names; values are
                   scalar tensors aggregated over the batch.
-                - List of per-metric weights (used by FlareLightningModule to
+                - List of per-metric weights (used by RadioBurstLightningModule to
                   combine multiple loss terms into a single scalar).
         """
 
@@ -246,3 +262,71 @@ class BurstMetrics:
                 raise NotImplementedError(
                     f"{self.mode} is not implemented as a valid metric case."
                 )
+
+
+class RadioBurstSpectraMetrics(RadioBurstMetrics):
+    """Metrics for HelioSpectformerBurst: a burst logit plus a full (T, F) spectrogram.
+
+    Predictions: ``preds["burst_logit"]`` (B, 1) and ``preds["spectra"]`` (B, T, F).
+    Targets: ``target["burst"]`` (B,) and ``target["spectra"]`` (B, T, F).
+
+    BCE is computed on the logit with ``binary_cross_entropy_with_logits``: plain
+    ``binary_cross_entropy`` on sigmoid outputs raises under CUDA autocast (bf16-mixed).
+    """
+
+    def __init__(self, mode: str, spectra_weight: float = 1.0):
+        """
+        Args:
+            mode (str): One of "train_loss", "val_loss", "train_metrics", or "val_metrics".
+            spectra_weight (float): Weight on the masked spectrogram MSE relative to the
+                        burst-classification BCE in the combined loss.
+        """
+        super().__init__(mode)
+        self.spectra_weight = spectra_weight
+
+    def _f1_from_logit(self, preds: dict, target: dict) -> torch.Tensor:
+        self._ensure_device(preds["burst_logit"])
+        burst_prob = torch.sigmoid(preds["burst_logit"]).reshape(-1)
+        return self._f1(burst_prob, target["burst"].reshape(-1).int())
+
+    def train_loss(
+        self, preds: dict, target: dict
+    ) -> tuple[dict[str, torch.Tensor], list[float]]:
+        """BCE on the burst logit, plus spectrogram MSE masked to burst rows."""
+        output_metrics = {}
+        output_weights = []
+
+        output_metrics["bce"] = torch.nn.functional.binary_cross_entropy_with_logits(
+            preds["burst_logit"].reshape(-1), target["burst"].reshape(-1).float()
+        )
+        output_weights.append(1.0)
+
+        output_metrics["mse_spectra"] = self._masked_mse(
+            preds["spectra"], target["spectra"], target["burst"]
+        )
+        output_weights.append(self.spectra_weight)
+
+        return output_metrics, output_weights
+
+    def train_metrics(
+        self, preds: dict, target: dict
+    ) -> tuple[dict[str, torch.Tensor], list[float]]:
+        """Reported only: burst F1 and masked spectrogram RRSE."""
+        output_metrics = {"f1": self._f1_from_logit(preds, target)}
+        output_metrics["rrse_spectra"] = self._masked_rrse(
+            preds["spectra"], target["spectra"], target["burst"]
+        )
+        return output_metrics, [1, 1]
+
+    def val_metrics(
+        self, preds: dict, target: dict
+    ) -> tuple[dict[str, torch.Tensor], list[float]]:
+        """Reported only: burst F1, masked spectrogram MSE and RRSE."""
+        output_metrics = {"f1": self._f1_from_logit(preds, target)}
+        output_metrics["mse_spectra"] = self._masked_mse(
+            preds["spectra"], target["spectra"], target["burst"]
+        )
+        output_metrics["rrse_spectra"] = self._masked_rrse(
+            preds["spectra"], target["spectra"], target["burst"]
+        )
+        return output_metrics, [1, 1, 1]
