@@ -74,7 +74,7 @@ class TwoStageBurstModel(nn.Module):
             This model expects 'ts' in the batch dict to already be in **signum-log** space
             (channel z-scores undone, log compression retained). Use
             destandardize_channels() to pre-process normalized SDO inputs before passing
-            them here (e.g., via the preprocess_fn argument of FlareLightningModule).
+            them here (e.g., via the preprocess_fn argument of RadioBurstLightningModule).
         """
         super().__init__()
         self.classifier = nn.Linear(input_dim, 1)

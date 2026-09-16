@@ -1,10 +1,10 @@
 """
-Task-specific configuration for the flare-forecasting template app.
+Task-specific configuration for the radio-burst downstream app.
 
 Everything generic — paths, channels, temporal sampling, S3 settings, the model and
 LoRA configs, the training and logging sections, and ``load_config()`` itself — lives in
 ``workshop_infrastructure/configs.py``. This file holds only what is specific to *this*
-task: the flare catalog and how its events are aligned to the Surya index.
+task: the radio-burst catalog and how its events are aligned to the Surya index.
 
 **This is the pattern to copy when you fork the template.** Subclass ``DataConfig`` with
 your task's fields, then bind ``load_config`` to it. You never maintain a copy of the
@@ -30,7 +30,7 @@ from workshop_infrastructure.configs import (  # re-exported for convenience
 
 @dataclass
 class RadioBurstDataConfig(DataConfig):
-    """DataConfig plus the flare-catalog alignment settings used by ``RadioBurstDSDataset``.
+    """DataConfig plus the radio-burst-catalog alignment settings used by ``RadioBurstDSDataset``.
 
     These keys are what makes this app's ``data:`` section different from any other
     downstream task's. Swap them for your own when you fork.
@@ -45,7 +45,7 @@ class RadioBurstDataConfig(DataConfig):
     ds_time_column: str = "window_start"
     # Max allowed gap when matching catalog events to Surya timesteps.
     ds_time_tolerance: str = "1h"
-    # "forward" uses the solar state *before* the flare (causal prediction).
+    # "forward" uses the solar state *before* the burst (causal prediction).
     ds_match_direction: str = "forward"
     # Column in catalog pointing to spectra file path
     ds_spectra_column: str = "window_start_file"
@@ -65,7 +65,7 @@ class RadioBurstDataConfig(DataConfig):
 
 
 # The app's entry point. Identical to load_config() except that the data: section is
-# parsed into FlareDataConfig, so the four keys above are recognized instead of rejected.
+# parsed into RadioBurstDataConfig, so the fields above are recognized instead of rejected.
 load_radioburst_config = partial(load_config, data_cls=RadioBurstDataConfig)
 
 

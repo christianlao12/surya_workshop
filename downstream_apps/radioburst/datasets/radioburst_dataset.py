@@ -8,24 +8,25 @@ from workshop_infrastructure.datasets.helio import HelioNetCDFDataset
 class RadioBurstDSDataset(HelioNetCDFDataset):
     """
     Template child class of HelioNetCDFDataset showing how to build a downstream dataset.
-    Extends the base class with a flare intensity label aligned to the Surya index.
+    Extends the base class with a burst label and radio spectra aligned to the Surya index.
 
     All ``HelioNetCDFDataset`` keyword arguments (``index_path``, ``scalers``, ``channels``,
     ``s3_cache_dir``, etc.) are accepted via ``**kwargs`` and forwarded to the base class.
-    ``load_forecast_frames`` defaults to ``False`` here (flare forecasting supplies its own
-    labels, so future Surya frames are never fetched); pass it explicitly to override.
+    ``load_forecast_frames`` defaults to ``False`` here (the radio-burst catalog supplies
+    its own labels, so future Surya frames are never fetched); pass it explicitly to override.
 
     Additional Args:
         return_surya_stack: If True (default), include the Surya image stack in the returned dict.
-            Set to False to return only the flare intensity label (useful for label inspection).
+            Set to False to return only the burst label and spectra (useful for label inspection).
         max_number_of_samples: Cap the dataset length at this value. Useful for quick experiments.
-        radioburst_folder_path: Path to the folder containing the radio burst index and spectra.
-        radioburst_index_path: Path to the radio burst CSV index.
-        ds_time_column: Column name in the flare index to use as the event timestamp.
+        ds_radioburst_folder_path: Path to the folder containing the radio burst index and spectra.
+        ds_radioburst_index_file: Filename of the radio burst CSV index, inside
+            ``ds_radioburst_folder_path``.
+        ds_time_column: Column name in the radio-burst catalog to use as the event timestamp.
         ds_time_tolerance: Maximum allowed time offset when matching Surya and DS indices
             (e.g., ``"15min"``). Unmatched entries are dropped.
         ds_match_direction: Merge direction passed to ``pd.merge_asof``. Use ``"forward"``
-            for causal prediction (predict flares from prior solar state).
+            for causal prediction (predict bursts from prior solar state).
         ds_spectra_column: Location of the file of the spectra of the radio burst in the data folder.
         spectra_transform: Optional callable applied to the ``ds_spectra_column`` files (loaded and
             stacked into a ``pd.Series`` of arrays) to produce the ``normalized_spectra`` column.
@@ -45,8 +46,9 @@ class RadioBurstDSDataset(HelioNetCDFDataset):
             non-value column dropped by position, matching the ``ds_spectra_column`` loader
             below. If ``None`` (default), ``self.median_spectra_template`` is ``None``.
     Raises:
-        ValueError: If ``ds_flare_index_path`` is not provided, or if no overlap exists
-            between the Surya and DS indices within the specified tolerance.
+        ValueError: If ``ds_radioburst_folder_path`` or ``ds_radioburst_index_file`` is not
+            provided, or if no overlap exists between the Surya and DS indices within the
+            specified tolerance.
     """
 
     def __init__(
@@ -69,8 +71,8 @@ class RadioBurstDSDataset(HelioNetCDFDataset):
         if ds_match_direction not in ["forward", "backward", "nearest"]:
             raise ValueError("ds_match_direction must be one of 'forward', 'backward', or 'nearest'")
 
-        # load_forecast_frames defaults to False here: flare forecasting supplies its
-        # own labels, so future Surya frames never need to be fetched from disk/S3.
+        # load_forecast_frames defaults to False here: the radio-burst catalog supplies
+        # its own labels, so future Surya frames never need to be fetched from disk/S3.
         kwargs.setdefault("load_forecast_frames", False)
         super().__init__(**kwargs)
 
