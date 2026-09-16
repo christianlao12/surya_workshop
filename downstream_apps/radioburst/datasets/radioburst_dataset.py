@@ -86,7 +86,7 @@ class RadioBurstDSDataset(HelioNetCDFDataset):
 
         self.ds_index["ds_index"] = pd.to_datetime(
             self.ds_index[ds_time_column]
-        ).values.astype("datetime64[ns]")
+        ).values.astype("datetime64[ns]") - pd.to_timedelta("3h")
         self.ds_index.sort_values("ds_index", inplace=True)
 
         # Load every spectra file referenced by the full catalog and apply spectra_transform
