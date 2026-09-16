@@ -49,6 +49,11 @@ class RadioBurstDataConfig(DataConfig):
     ds_match_direction: str = "forward"
     # Column in catalog pointing to spectra file path
     ds_spectra_column: str = "window_start_file"
+    # Filename of the precomputed median burst-spectrogram template *inside*
+    # ds_radioburst_folder_path (see downstream_apps/radioburst/compute_median_template.py).
+    # Not a PATH_FIELD, for the same reason as ds_radioburst_index_file above: it's joined
+    # onto ds_radioburst_folder_path, not resolved independently relative to the config file.
+    ds_spectra_template_file: str = ""
     # Catalog columns holding per-burst diagnostic measurements, packed into a diagnostics
     # regression target by RadioBurstDSDataset. None disables it.
     ds_diagnostics_columns: list[str] | None = None

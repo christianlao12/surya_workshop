@@ -2,6 +2,8 @@
 A simple linear regression model to be used as a baseline for radio burst forecasting.
 """
 
+import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 from einops import rearrange
@@ -35,8 +37,26 @@ def destandardize_channels(batch: dict, channel_order: list, scalers: dict) -> d
     return {**batch, "ts": x}
 
 
+def load_spectra_template(path) -> np.ndarray:
+    """Load a precomputed median burst-spectrogram template (see
+    ``compute_median_template.py``) for ``TwoStageBurstModel``'s ``median_template`` arg.
+
+    The template file mirrors the shape of an individual burst spectra file — a leading
+    non-value column (a timestamp or, for the template, a nominal step label) followed by
+    one column per frequency bin — but isn't required to use the same column names, so the
+    leading column is dropped by position rather than by name.
+
+    Args:
+        path: Path to the template CSV.
+
+    Returns:
+        (T, F) array of the frequency-bin columns.
+    """
+    return pd.read_csv(path).iloc[:, 1:].to_numpy(dtype=np.float32)
+
+
 class TwoStageBurstModel(nn.Module):
-    def __init__(self, input_dim: int, n_diagnostics: int):
+    def __init__(self, input_dim: int, median_template: np.ndarray | torch.Tensor):
         """
         Initializes the TwoStageBurstModel.
 
@@ -44,8 +64,11 @@ class TwoStageBurstModel(nn.Module):
             input_dim (int): The size of the input vector after channel and time dimensions are
                 flattened. Since forward() concatenates spatial mean and std per channel/timestep,
                 this should equal 2 * C * T.
-            n_diagnostics (int): The size of the target of regression. This should equal 
-            len(ds_diagnostic_columns) from the config.
+            median_template (np.ndarray | torch.Tensor): (T, F) median burst spectrogram
+                shape — e.g. from ``load_spectra_template()`` — that every prediction
+                rescales. Stored normalized so its own peak cell is 1; the regressed
+                ``peak_amp`` then rescales it back into real (raw-flux) units, in the same
+                space as the ``"spectra"`` target from ``RadioBurstDSDataset``.
 
         Note:
             This model expects 'ts' in the batch dict to already be in **signum-log** space
@@ -55,7 +78,10 @@ class TwoStageBurstModel(nn.Module):
         """
         super().__init__()
         self.classifier = nn.Linear(input_dim, 1)
-        self.regressor = nn.Linear(input_dim, n_diagnostics)
+        self.amplitude_regressor = nn.Linear(input_dim, 1)
+
+        template = torch.as_tensor(median_template, dtype=torch.float32)
+        self.register_buffer("normalized_template", template / template.max())
 
     def forward(self, x: dict) -> dict:
         """
@@ -69,6 +95,14 @@ class TwoStageBurstModel(nn.Module):
         T - Time steps
         H - Height
         W - Width
+
+        Returns:
+            dict with:
+                "burst_prob" (B, 1): sigmoid burst classification.
+                "peak_amp" (B, 1): regressed amplitude, in the same units as the catalog's
+                    ``peak_amp`` column and the raw-flux ``"spectra"`` target.
+                "spectra" (B, T, F): ``peak_amp`` * the normalized median template — the
+                    shape-times-amplitude spectrogram prediction.
         """
         x = x["ts"]
 
@@ -83,6 +117,7 @@ class TwoStageBurstModel(nn.Module):
         x = rearrange(x, "b c t -> b (c t)")
 
         burst_prob = torch.sigmoid(self.classifier(x))
-        diagnostics = self.regressor(x)
+        peak_amp = self.amplitude_regressor(x)
+        spectra = peak_amp.unsqueeze(-1) * self.normalized_template.unsqueeze(0)
 
-        return {"burst_prob": burst_prob, "diagnostics": diagnostics}
+        return {"burst_prob": burst_prob, "peak_amp": peak_amp, "spectra": spectra}

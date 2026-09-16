@@ -38,6 +38,12 @@ class RadioBurstDSDataset(HelioNetCDFDataset):
         ds_diagnostics_columns: Optional list of catalog column names holding per-burst diagnostic
             measurements (e.g. ``["peak_amp", "energy", "f_centroid", "f_spread", "t_spread"]``) to
             expose as a regression target. If ``None`` (default), no diagnostics tuple is returned.
+        ds_spectra_template_file: Optional filename, inside ``ds_radioburst_folder_path``, of a
+            precomputed median burst-spectrogram template (see
+            ``downstream_apps/radioburst/compute_median_template.py``). If given, loaded once
+            into ``self.median_spectra_template`` — a ``(T, F)`` array with the leading
+            non-value column dropped by position, matching the ``ds_spectra_column`` loader
+            below. If ``None`` (default), ``self.median_spectra_template`` is ``None``.
     Raises:
         ValueError: If ``ds_flare_index_path`` is not provided, or if no overlap exists
             between the Surya and DS indices within the specified tolerance.
@@ -56,6 +62,7 @@ class RadioBurstDSDataset(HelioNetCDFDataset):
         ds_spectra_column: str | None = None,
         spectra_transform: Callable[[pd.Series], pd.Series] | None = None,
         ds_diagnostics_columns: list[str] | None = None,
+        ds_spectra_template_file: str | None = None,
         # All HelioNetCDFDataset parameters (index_path, scalers, channels, s3_*, etc.)
         **kwargs,
     ):
@@ -105,6 +112,14 @@ class RadioBurstDSDataset(HelioNetCDFDataset):
             self.ds_index["normalized_spectra"] = spectra_transform(raw_spectra)
         else:
             self.ds_index["normalized_spectra"] = raw_spectra
+
+        self.median_spectra_template = (
+            pd.read_csv(self.ds_radioburst_folder_path / ds_spectra_template_file)
+            .iloc[:, 1:]
+            .to_numpy(dtype=np.float32)
+            if ds_spectra_template_file
+            else None
+        )
 
         # Create Surya valid indices and find closest match to DS index
         self.df_valid_indices = pd.DataFrame(

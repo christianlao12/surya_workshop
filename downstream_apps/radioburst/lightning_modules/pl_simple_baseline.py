@@ -15,8 +15,12 @@ Intended use:
   - Demonstrate how to log multiple losses/metrics consistently
 
 Key batch contract:
-  - batch["ts"]       : torch.Tensor input stack (e.g., [B, C, T, H, W])
-  - batch["forecast"] : torch.Tensor target values (e.g., [B] or [B,])
+  - batch["ts"]          : torch.Tensor input stack (e.g., [B, C, T, H, W])
+  - batch["burst"]       : torch.Tensor 0/1 burst label (e.g., [B])
+  - batch["diagnostics"] : torch.Tensor peak_amp regression target, shape [B, 1]
+                            (narrowed via ds_diagnostics_columns: [peak_amp] in the
+                            config); NaN in rows where burst == 0. Compared against the
+                            model's "peak_amp" output by BurstMetrics.
 
 Optional preprocessing:
   - If ``preprocess_fn`` is provided to ``__init__``, it is called on the batch dict
@@ -152,7 +156,7 @@ class RadioBurstLightningModule(L.LightningModule):
         Parameters
         ----------
         batch:
-            Batch dict (at minimum contains ``"ts"`` and ``"forecast"``).
+            Batch dict (at minimum contains ``"ts"``, ``"burst"``, and ``"diagnostics"``).
 
         Returns
         -------
@@ -169,7 +173,7 @@ class RadioBurstLightningModule(L.LightningModule):
         --------
         1) Extract inputs and targets from the batch:
               x = batch["ts"]
-              target = batch["forecast"]
+              target = {"burst": batch["burst"], "diagnostics": batch["diagnostics"]}
         2) Compute model output:
               output = self(x)
         3) Compute per-component losses and combine via provided weights:
@@ -181,8 +185,12 @@ class RadioBurstLightningModule(L.LightningModule):
 
         Notes
         -----
-        - Targets are reshaped to shape [B, 1] by unsqueeze(1) to match a common
-          "single output per sample" convention.
+        - `target` is a dict (`"burst"`, `"diagnostics"`); `output` is
+          `TwoStageBurstModel`'s dict (`"burst_prob"`, `"peak_amp"`, `"spectra"`).
+          Loss/metric callables (e.g. `BurstMetrics`) index into both by key rather than
+          operating on a single tensor — `target["diagnostics"]` (the peak_amp target) is
+          compared against `output["peak_amp"]`; `output["spectra"]` is currently unused
+          by any loss/metric.
         - The loss combination depends on dict iteration order; ensure loss dict
           insertion order is consistent if that matters.
 
@@ -191,7 +199,7 @@ class RadioBurstLightningModule(L.LightningModule):
         torch.Tensor
             The scalar training loss used for backpropagation.
         """
-        target = batch["forecast"].unsqueeze(1).float()
+        target = {"burst": batch["burst"], "diagnostics": batch["diagnostics"]}
 
         if self.preprocess_fn is not None:
             batch = self.preprocess_fn(batch)
@@ -236,7 +244,7 @@ class RadioBurstLightningModule(L.LightningModule):
           of this method are reported only and do not affect checkpoint selection.
         - No value is returned (Lightning uses logs for validation tracking).
         """
-        target = batch["forecast"].unsqueeze(1).float()
+        target = {"burst": batch["burst"], "diagnostics": batch["diagnostics"]}
 
         if self.preprocess_fn is not None:
             batch = self.preprocess_fn(batch)

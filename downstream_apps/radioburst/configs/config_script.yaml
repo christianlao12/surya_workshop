@@ -49,8 +49,14 @@ data:
   ds_time_tolerance: 30m           # Max allowed gap between catalog and Surya timestamps
   ds_match_direction: forward     # "forward": use solar state *before* the flare (causal)
   ds_spectra_column: window_start_file # Column in the radio burst catalog showing file
-  ds_diagnostics_columns: [peak_amp, energy, f_centroid, f_spread, t_spread]
-    # Catalog columns packed into the diagnostics regression target (per-burst diagnostics)
+  ds_spectra_template_file: burst_data/Burst_Median_Spectrum.csv
+    # Precomputed median burst-spectrogram template, inside ds_radioburst_folder_path,
+    # used by TwoStageBurstModel to scale its peak_amp prediction into a full spectrogram.
+    # See downstream_apps/radioburst/compute_median_template.py.
+  ds_diagnostics_columns: [peak_amp]
+    # Catalog column packed into the diagnostics regression target. Narrowed to peak_amp
+    # only: TwoStageBurstModel regresses a single amplitude that scales the median
+    # spectrogram template (ds_spectra_template_file above), not the old 5-column vector.
 
   # -- Local data (only needed when the index contains relative local paths) --
   # sdo_data_root_path: /path/to/sdo   # Prepended to relative local paths; ignored for s3://
