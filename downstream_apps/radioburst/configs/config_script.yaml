@@ -211,5 +211,5 @@ output:
 # Logging
 # -----------------------------------------------------------------------------
 logging:
-  wandb_project: template_flare_regression
-  wandb_entity: null      # WandB team/org name; null to log to your personal account
+  wandb_project: radioburst_classification
+  wandb_entity: surya-ws2  # WandB team/org name; null to log to your personal account
