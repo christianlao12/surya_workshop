@@ -46,7 +46,8 @@ data:
   ds_radioburst_folder_path: /home/jovyan/scratch_space/clao/Data/
   ds_radioburst_index_file: SuryaWorkshopIndex.csv
   ds_time_column: window_start    # Column in the radio burst catalog used as the event timestamp
-  ds_time_tolerance: 30m           # Max allowed gap between catalog and Surya timestamps
+  ds_forecast_horizon: 3h         # Lead time: Surya frame is taken at least this long before window_start
+  ds_time_tolerance: 30m           # ...and at most this much earlier still (lead in [3h, 3h30m])
   ds_match_direction: forward     # "forward": use solar state *before* the flare (causal)
   ds_spectra_column: window_start_file # Column in the radio burst catalog showing file
   ds_spectra_template_file: burst_data/Burst_Median_Spectrum.csv

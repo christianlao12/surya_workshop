@@ -43,6 +43,8 @@ class RadioBurstDataConfig(DataConfig):
     ds_radioburst_index_file: str = ""
     # Column in the catalog holding the event timestamp.
     ds_time_column: str = "window_start"
+    # Lead time: the Surya frame is taken at least this long before ds_time_column.
+    ds_forecast_horizon: str = "3h"
     # Max allowed gap when matching catalog events to Surya timesteps.
     ds_time_tolerance: str = "1h"
     # "forward" uses the solar state *before* the burst (causal prediction).

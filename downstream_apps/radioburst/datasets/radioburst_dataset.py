@@ -2,6 +2,8 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 from typing import Callable, Literal
+
+from downstream_apps.radioburst.spectra_transform import read_spectra_file
 from workshop_infrastructure.datasets.helio import HelioNetCDFDataset
 
 
@@ -23,8 +25,15 @@ class RadioBurstDSDataset(HelioNetCDFDataset):
         ds_radioburst_index_file: Filename of the radio burst CSV index, inside
             ``ds_radioburst_folder_path``.
         ds_time_column: Column name in the radio-burst catalog to use as the event timestamp.
+        ds_forecast_horizon: Lead time between the Surya frame and the catalog timestamp
+            (e.g., ``"3h"``). Catalog timestamps are shifted back by this amount before
+            matching, so with ``ds_match_direction="forward"`` the Surya frame is at least
+            this long before ``ds_time_column``. ``"0h"`` (default) matches without a lead.
         ds_time_tolerance: Maximum allowed time offset when matching Surya and DS indices
-            (e.g., ``"15min"``). Unmatched entries are dropped.
+            (e.g., ``"15min"``), measured after the ``ds_forecast_horizon`` shift. With
+            ``"forward"`` matching the lead time therefore lies in
+            ``[ds_forecast_horizon, ds_forecast_horizon + ds_time_tolerance]``. Unmatched
+            entries are dropped.
         ds_match_direction: Merge direction passed to ``pd.merge_asof``. Use ``"forward"``
             for causal prediction (predict bursts from prior solar state).
         ds_spectra_column: Location of the file of the spectra of the radio burst in the data folder.
@@ -59,6 +68,7 @@ class RadioBurstDSDataset(HelioNetCDFDataset):
         ds_radioburst_folder_path: str | None = None,
         ds_radioburst_index_file: str | None = None,
         ds_time_column: str | None = None,
+        ds_forecast_horizon: str = "0h",
         ds_time_tolerance: str | None = None,
         ds_match_direction: Literal["forward", "backward", "nearest"] = "forward",
         ds_spectra_column: str | None = None,
@@ -93,9 +103,11 @@ class RadioBurstDSDataset(HelioNetCDFDataset):
                     f"ds_diagnostics_columns not found in catalog: {sorted(missing)}"
                 )
 
+        # Shift each event back by the forecast horizon, so the Surya frame matched to it
+        # below precedes the event by at least that much.
         self.ds_index["ds_index"] = pd.to_datetime(
             self.ds_index[ds_time_column]
-        ).values.astype("datetime64[ns]") - pd.to_timedelta("3h")
+        ).values.astype("datetime64[ns]") - pd.Timedelta(ds_forecast_horizon)
         self.ds_index.sort_values("ds_index", inplace=True)
 
         # Load every spectra file referenced by the full catalog and apply spectra_transform
@@ -106,9 +118,7 @@ class RadioBurstDSDataset(HelioNetCDFDataset):
         # entire (train + val) population - mirroring how label_transform is applied to
         # FlareDSDataset's "intensity" column in downstream_apps/template.
         raw_spectra = self.ds_index[ds_spectra_column].apply(
-            lambda p: pd.read_csv(self.ds_radioburst_folder_path / p)
-            .drop(columns="time")
-            .to_numpy(dtype=np.float32)
+            lambda p: read_spectra_file(self.ds_radioburst_folder_path, p)
         )
         if spectra_transform is not None:
             self.ds_index["normalized_spectra"] = spectra_transform(raw_spectra)
