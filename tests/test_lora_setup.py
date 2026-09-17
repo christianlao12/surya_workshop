@@ -16,7 +16,7 @@ import pytest
 import torch
 from torch import nn
 
-from conftest import DEPTH, EMBED_DIM, N_ATTENTION_BLOCKS, N_SPECTRAL_BLOCKS, make_batch, make_model
+from tiny_models import DEPTH, EMBED_DIM, N_ATTENTION_BLOCKS, N_SPECTRAL_BLOCKS, make_batch, make_model
 from workshop_infrastructure.configs import LoraAdapterConfig
 from workshop_infrastructure.models.finetune_models import ClassToken
 from workshop_infrastructure.utils import HEAD_PREFIX, apply_peft_lora, discover_head_modules

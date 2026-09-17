@@ -52,7 +52,7 @@ isort .
 mypy .
 ```
 
-Run the test suite with `pytest tests/ -v` (currently `tests/test_lora_setup.py`, which is CPU-only and fast). For changes not covered by tests, verify by running the training script with `max_samples` capped (see above).
+Run the whole suite with `pytest -v` from the repo root. It lives in two places, and both are CPU-only and fast: `tests/` holds the shared-infrastructure tests, and each downstream app keeps its own next to the code it covers (`downstream_apps/radioburst/tests/`). The tiny model fixtures are shared — they live in `tests/tiny_models.py`, and an app's `tests/conftest.py` puts them on the path, so an app's tests also run on their own (`pytest downstream_apps/radioburst/tests -v`). For changes not covered by tests, verify by running the training script with `max_samples` capped (see above).
 
 ## Architecture
 
@@ -151,6 +151,8 @@ DDP via PyTorch Lightning. Use `CUDA_VISIBLE_DEVICES` to select GPUs. Logging is
 | Asset download (scalers, weights) | `workshop_infrastructure/assets.py` |
 | LoRA application + `head_` discovery | `workshop_infrastructure/utils.py` |
 | LoRA setup tests | `tests/test_lora_setup.py` |
+| Shared tiny-model test fixtures | `tests/tiny_models.py` |
+| Radio-burst app tests | `downstream_apps/radioburst/tests/` |
 | Downstream adapter model | `workshop_infrastructure/models/finetune_models.py` |
 | Fine-tuning entry point | `downstream_apps/template/3_finetune_template_1D.py` |
 | Model weights (HuggingFace) | `nasa-impact/surya` |

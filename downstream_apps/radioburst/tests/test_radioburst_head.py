@@ -7,7 +7,7 @@ decoder follows the head_ convention so it stays trainable under LoRA.
 import torch
 from torch import nn
 
-from conftest import (
+from tiny_models import (
     DEPTH,
     EMBED_DIM,
     IMG_SIZE,

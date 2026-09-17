@@ -14,7 +14,7 @@ import dataclasses
 
 import pytest
 
-from conftest import make_batch, make_model
+from tiny_models import make_batch, make_model
 from downstream_apps.template.configs import load_flare_config
 from workshop_infrastructure.configs import (
     DataConfig,
