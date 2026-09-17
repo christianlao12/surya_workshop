@@ -109,7 +109,7 @@ data:
   s3_boto3_part_size_mb: 64       # part size in MB (benchmark default: 64)
 
   # -- Development --
-  max_samples: 10                 # Cap dataset size for quick experiments (null = all samples)
+  max_samples: null                 # Cap dataset size for quick experiments (null = all samples)
 
 
 # -----------------------------------------------------------------------------
@@ -171,7 +171,7 @@ model:
 training:
   learning_rate: 0.0001
   batch_size: 2         # Per-device batch size under DDP
-  max_epochs: 20        # Can be overridden with --max-epochs at the CLI
+  max_epochs: 25        # Can be overridden with --max-epochs at the CLI
   num_workers: 8        # DataLoader worker processes per device (use 0 to debug in-process)
 
   # -- Reproducibility --
