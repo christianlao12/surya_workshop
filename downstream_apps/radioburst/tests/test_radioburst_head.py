@@ -15,7 +15,10 @@ from tiny_models import (
     PATCH_SIZE,
     make_batch,
 )
-from downstream_apps.radioburst.metrics.radioburst_metrics import RadioBurstSpectraMetrics
+from downstream_apps.radioburst.metrics.radioburst_metrics import (
+    RadioBurstMetrics,
+    RadioBurstSpectraMetrics,
+)
 from downstream_apps.radioburst.models.finetune_burst import HelioSpectformerBurst
 from workshop_infrastructure.configs import LoraAdapterConfig
 from workshop_infrastructure.utils import apply_peft_lora, discover_head_modules
@@ -48,6 +51,14 @@ def make_target(batch_size=2):
     return {
         "burst": torch.tensor([1, 0][:batch_size]),
         "spectra": torch.randn(batch_size, *SPECTRUM_SHAPE),
+    }
+
+
+def make_preds(batch_size=2):
+    """Stand-in head outputs, so the metric tests need no forward pass."""
+    return {
+        "burst_logit": torch.zeros(batch_size, 1),
+        "spectra": torch.zeros(batch_size, *SPECTRUM_SHAPE),
     }
 
 
@@ -114,8 +125,8 @@ def test_spectra_loss_is_masked_to_burst_rows():
     preds["spectra"][1] += 100.0  # row 1 is quiet (burst == 0), so this must be ignored
 
     losses, _ = metrics(preds, target)
-    assert losses["mse_spectra"] == 0
-    assert torch.isfinite(losses["bce"])
+    assert losses["spectra_mse"] == 0
+    assert torch.isfinite(losses["burst_bce"])
 
 
 def test_missing_spectra_cells_are_skipped():
@@ -126,8 +137,68 @@ def test_missing_spectra_cells_are_skipped():
 
     losses, _ = RadioBurstSpectraMetrics("train_loss")(preds, target)
     finite = target["spectra"][0][torch.isfinite(target["spectra"][0])]
-    assert torch.isfinite(losses["mse_spectra"])
-    assert torch.allclose(losses["mse_spectra"], (finite**2).mean())
+    assert torch.isfinite(losses["spectra_mse"])
+    assert torch.allclose(losses["spectra_mse"], (finite**2).mean())
 
     metrics, _ = RadioBurstSpectraMetrics("val_metrics")(preds, target)
     assert all(torch.isfinite(v) for v in metrics.values())
+
+
+def test_default_weights_reproduce_the_unweighted_sum():
+    """The defaults must not change the objective, so a reweighted run is attributable."""
+    metrics = RadioBurstSpectraMetrics("train_loss")
+    assert metrics.loss_weights == {"burst_weight": 1.0, "spectra_weight": 1.0}
+
+    _, weights = metrics(make_preds(), make_target())
+    assert list(weights) == [1.0, 1.0]
+
+
+def test_weights_are_returned_paired_with_their_own_term():
+    """The weight list is matched to the loss dict BY POSITION in _combine_losses.
+
+    Nothing in that pairing is checked at runtime, so a term added to train_loss without a
+    matching append would silently weight the wrong loss. This pins the mapping by name.
+    """
+    metrics = RadioBurstSpectraMetrics("train_loss", burst_weight=3.0, spectra_weight=0.25)
+    losses, weights = metrics(make_preds(), make_target())
+
+    assert dict(zip(losses, weights)) == {"burst_bce": 3.0, "spectra_mse": 0.25}
+    assert metrics.loss_weights == {"burst_weight": 3.0, "spectra_weight": 0.25}
+
+
+def test_val_loss_is_the_reweighted_sum():
+    """val_loss must carry the same weights as train_loss: it is what ModelCheckpoint ranks."""
+    preds, target = make_preds(), make_target()
+    kwargs = dict(burst_weight=2.0, spectra_weight=0.5)
+
+    train_losses, train_weights = RadioBurstSpectraMetrics("train_loss", **kwargs)(preds, target)
+    val_losses, val_weights = RadioBurstSpectraMetrics("val_loss", **kwargs)(preds, target)
+
+    assert list(val_losses) == list(train_losses)
+    assert list(val_weights) == list(train_weights) == [2.0, 0.5]
+
+
+def test_val_metrics_do_not_duplicate_val_loss_terms():
+    """val_metrics used to recompute the masked MSE that val_loss already reports."""
+    preds, target = make_preds(), make_target()
+
+    losses, _ = RadioBurstSpectraMetrics("val_loss")(preds, target)
+    metrics, weights = RadioBurstSpectraMetrics("val_metrics")(preds, target)
+
+    assert set(losses).isdisjoint(metrics), "val_metrics re-reports a val_loss term"
+    assert len(weights) == len(metrics)
+
+
+def test_baseline_metric_names_match_the_spectra_head():
+    """The linear baseline shares the <task>_<metric> naming, so notebook 1 and 2 line up."""
+    preds = {"burst_prob": torch.full((2, 1), 0.5), "peak_amp": torch.zeros(2, 1)}
+    target = {"burst": torch.tensor([1, 0]), "diagnostics": torch.zeros(2, 1)}
+
+    losses, weights = RadioBurstMetrics("train_loss", burst_weight=2.0, peak_amp_weight=0.5)(
+        preds, target
+    )
+    assert dict(zip(losses, weights)) == {"burst_bce": 2.0, "peak_amp_mse": 0.5}
+
+    metrics, _ = RadioBurstMetrics("val_metrics")(preds, target)
+    assert set(metrics) == {"burst_f1", "peak_amp_rrse"}
+    assert set(losses).isdisjoint(metrics)

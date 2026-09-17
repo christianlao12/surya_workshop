@@ -47,6 +47,22 @@ Where:
   - loss_dict / metric_dict map string names -> torch scalar tensors
   - weight_list is a list-like of floats (or tensors) aligned with the dict iteration order
     used by this baseline to form a weighted sum loss.
+
+Two consequences of that weighted sum worth knowing when reading the logs:
+
+  - Component losses are logged as they come back from the metrics object, i.e. UNWEIGHTED,
+    while "train_loss"/"val_loss" are the weighted sums. At any weight other than 1.0 the
+    components will not add up to the total. This is deliberate: a raw component curve stays
+    comparable across runs that used different weights.
+  - The weights themselves are constructor arguments of the metrics object and appear in no
+    config file, so this module reads them off ``metrics["train_loss"].loss_weights`` (when
+    present) and records them as hyperparameters — otherwise a finished run would carry no
+    record of the weighting that produced it.
+
+This module also logs "train_burst_rows"/"val_burst_rows", the number of burst rows per
+batch. The regression terms are masked to those rows, so a batch with none contributes a
+flat 0.0 to that term; the counter is what makes that visible instead of looking like a
+perfectly fitted batch.
 """
 
 from __future__ import annotations
@@ -100,6 +116,9 @@ class RadioBurstLightningModule(L.LightningModule):
           - val_metrics logged during validation_step (if weights is non-empty).
             Reported only; they do not influence checkpoint selection.
 
+        If metrics["train_loss"] exposes a ``loss_weights`` mapping, it is recorded as this
+        module's hyperparameters (see the module docstring).
+
     lr:
         Learning rate for the Adam optimizer.
 
@@ -139,6 +158,15 @@ class RadioBurstLightningModule(L.LightningModule):
         self.validation_evaluation = metrics["val_metrics"]
 
         self.lr = lr
+
+        # Record the loss weights with the run. Passing an explicit dict keeps
+        # save_hyperparameters from introspecting this signature (which would try to store
+        # `model` and `metrics`); the values reach the WandB config, the CSVLogger's
+        # hparams.yaml, and the saved checkpoint, so a checkpoint knows what it was trained
+        # under. getattr, because a metrics object need not expose the property.
+        loss_weights = getattr(self.training_loss, "loss_weights", {})
+        if loss_weights:
+            self.save_hyperparameters(dict(loss_weights))
 
     @staticmethod
     def _combine_losses(loss_dict: LossDict, weights: Weights) -> torch.Tensor:
@@ -186,7 +214,8 @@ class RadioBurstLightningModule(L.LightningModule):
               training_losses, training_loss_weights = training_loss(output, target)
         4) Log:
               - total weighted loss as "train_loss" (progress bar)
-              - each component loss as "train_loss_<name>"
+              - each component loss as "train_loss_<name>", unweighted
+              - the batch's burst-row count as "train_burst_rows"
               - training metrics as "train_metric_<name>" (if any)
 
         Notes
@@ -212,8 +241,13 @@ class RadioBurstLightningModule(L.LightningModule):
         training_losses, training_loss_weights = self.training_loss(output, target)
         loss = self._combine_losses(training_losses, training_loss_weights)
 
-        # Log aggregate loss and component losses.
+        # Log aggregate loss and component losses. Components are the raw, unweighted
+        # values the metrics object returned; `loss` is the weighted sum of them.
         self.log("train_loss", loss, prog_bar=True, batch_size=self.batch_size, sync_dist=True)
+        # Burst rows in this batch. The masked regression term is 0.0 when this is 0, so the
+        # epoch mean of that term is pulled toward zero by burst-free batches; this is how
+        # you tell that apart from the decoder actually improving.
+        self.log("train_burst_rows", target["burst"].sum().float(), prog_bar=False, batch_size=self.batch_size, sync_dist=True)
         for key in training_losses.keys():
             self.log(f"train_loss_{key}", training_losses[key], prog_bar=False, batch_size=self.batch_size, sync_dist=True)
 
@@ -236,7 +270,8 @@ class RadioBurstLightningModule(L.LightningModule):
         3) Compute validation losses and combine via weights
         4) Log:
               - total weighted loss as "val_loss" (progress bar)
-              - each component loss as "val_loss_<name>"
+              - each component loss as "val_loss_<name>", unweighted
+              - the batch's burst-row count as "val_burst_rows"
               - validation metrics as "val_metric_<name>" (if any)
 
         Notes
@@ -257,8 +292,9 @@ class RadioBurstLightningModule(L.LightningModule):
         val_losses, val_loss_weights = self.validation_loss(output, target)
         loss = self._combine_losses(val_losses, val_loss_weights)
 
-        # Log aggregate loss and component losses.
+        # Log aggregate loss and component losses (components raw; `loss` is the weighted sum).
         self.log("val_loss", loss, prog_bar=True, batch_size=self.batch_size, sync_dist=True)
+        self.log("val_burst_rows", target["burst"].sum().float(), prog_bar=False, batch_size=self.batch_size, sync_dist=True)
         for key in val_losses.keys():
             self.log(f"val_loss_{key}", val_losses[key], prog_bar=False, batch_size=self.batch_size, sync_dist=True)
 
