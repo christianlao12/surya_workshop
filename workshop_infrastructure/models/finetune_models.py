@@ -159,7 +159,13 @@ class HelioSpectformer1D(nn.Module):
 
         self.head_unembed = nn.Linear(embed_dim, num_outputs)
 
-    def forward(self, batch):
+    def forward_features(self, batch) -> torch.Tensor:
+        """Run the backbone and pool it down to one ``(B, embed_dim)`` vector per sample.
+
+        Split out from ``forward`` so a task needing several outputs can project this
+        embedding more than once -- see ``HelioSpectformerBurst`` in the radioburst app --
+        rather than packing them into ``head_unembed`` and slicing the result apart.
+        """
         if self.pooling == "class_token":
             # (1, 1, D) -- forward_with_cls_token expands it over the batch itself.
             tokens = self.backbone.forward_with_cls_token(batch, self.head_cls_token(1))
@@ -190,7 +196,10 @@ class HelioSpectformer1D(nn.Module):
         if self.head_dropout is not None:
             agg_tokens = self.head_dropout(agg_tokens)
 
-        return self.head_unembed(agg_tokens).squeeze(dim=1)
+        return agg_tokens
+
+    def forward(self, batch):
+        return self.head_unembed(self.forward_features(batch)).squeeze(dim=1)
 
     @classmethod
     def from_config(cls, cfg: "ModelConfig", **overrides) -> "HelioSpectformer1D":

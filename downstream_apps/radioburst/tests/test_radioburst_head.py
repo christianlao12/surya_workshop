@@ -5,7 +5,6 @@ decoder follows the head_ convention so it stays trainable under LoRA.
 """
 
 import torch
-from torch import nn
 
 from tiny_models import (
     DEPTH,
@@ -54,10 +53,13 @@ def make_target(batch_size=2):
 
 def test_head_layer_sizes():
     model = make_burst_model()
-    assert model.head_unembed.out_features == 1 + RANK
-    assert isinstance(model.head_spectra_decoder, nn.Linear)
-    assert model.head_spectra_decoder.in_features == RANK
-    assert model.head_spectra_decoder.out_features == SPECTRUM_SHAPE[0] * SPECTRUM_SHAPE[1]
+    assert model.head_unembed.out_features == 1
+    coefficients, basis = model.head_spectra
+    assert (coefficients.in_features, coefficients.out_features) == (EMBED_DIM, RANK)
+    assert (basis.in_features, basis.out_features) == (
+        RANK,
+        SPECTRUM_SHAPE[0] * SPECTRUM_SHAPE[1],
+    )
 
 
 def test_output_keys_and_shapes():
@@ -78,7 +80,7 @@ def test_decoder_is_discovered_as_head():
         "head_cls_token",
         "head_linear",
         "head_unembed",
-        "head_spectra_decoder",
+        "head_spectra",
     }
 
 
@@ -90,10 +92,10 @@ def test_lora_step_updates_both_output_layers():
         name: param
         for name, param in model.named_parameters()
         if "modules_to_save" in name
-        and ("head_unembed" in name or "head_spectra_decoder" in name)
+        and ("head_unembed" in name or "head_spectra" in name)
     }
     assert any("head_unembed" in n for n in tracked)
-    assert any("head_spectra_decoder" in n for n in tracked)
+    assert any("head_spectra" in n for n in tracked)
     before = {name: param.detach().clone() for name, param in tracked.items()}
 
     optimizer = torch.optim.SGD([p for p in model.parameters() if p.requires_grad], lr=1.0)
