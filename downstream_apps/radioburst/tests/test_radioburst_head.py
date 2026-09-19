@@ -4,6 +4,7 @@ Checks the output contract the radio-burst metrics rely on, and that the extra b
 decoder follows the head_ convention so it stays trainable under LoRA.
 """
 
+import pytest
 import torch
 
 from tiny_models import (
@@ -125,7 +126,7 @@ def test_spectra_loss_is_masked_to_burst_rows():
     preds["spectra"][1] += 100.0  # row 1 is quiet (burst == 0), so this must be ignored
 
     losses, _ = metrics(preds, target)
-    assert losses["spectra_mse"] == 0
+    assert losses["spectra_nmse"] == 0
     assert torch.isfinite(losses["burst_bce"])
 
 
@@ -137,8 +138,9 @@ def test_missing_spectra_cells_are_skipped():
 
     losses, _ = RadioBurstSpectraMetrics("train_loss")(preds, target)
     finite = target["spectra"][0][torch.isfinite(target["spectra"][0])]
-    assert torch.isfinite(losses["spectra_mse"])
-    assert torch.allclose(losses["spectra_mse"], (finite**2).mean())
+    expected_variance = finite.var(unbiased=False).clamp_min(1.0)
+    assert torch.isfinite(losses["spectra_nmse"])
+    assert torch.allclose(losses["spectra_nmse"], (finite**2).mean() / expected_variance)
 
     metrics, _ = RadioBurstSpectraMetrics("val_metrics")(preds, target)
     assert all(torch.isfinite(v) for v in metrics.values())
@@ -162,7 +164,7 @@ def test_weights_are_returned_paired_with_their_own_term():
     metrics = RadioBurstSpectraMetrics("train_loss", burst_weight=3.0, spectra_weight=0.25)
     losses, weights = metrics(make_preds(), make_target())
 
-    assert dict(zip(losses, weights)) == {"burst_bce": 3.0, "spectra_mse": 0.25}
+    assert dict(zip(losses, weights)) == {"burst_bce": 3.0, "spectra_nmse": 0.25}
     assert metrics.loss_weights == {"burst_weight": 3.0, "spectra_weight": 0.25}
 
 
@@ -192,13 +194,83 @@ def test_val_metrics_do_not_duplicate_val_loss_terms():
 def test_baseline_metric_names_match_the_spectra_head():
     """The linear baseline shares the <task>_<metric> naming, so notebook 1 and 2 line up."""
     preds = {"burst_prob": torch.full((2, 1), 0.5), "peak_amp": torch.zeros(2, 1)}
-    target = {"burst": torch.tensor([1, 0]), "diagnostics": torch.zeros(2, 1)}
+    target = {"burst": torch.tensor([1, 0]), "spectra": torch.zeros(2, 3, 4)}
 
     losses, weights = RadioBurstMetrics("train_loss", burst_weight=2.0, peak_amp_weight=0.5)(
         preds, target
     )
-    assert dict(zip(losses, weights)) == {"burst_bce": 2.0, "peak_amp_mse": 0.5}
+    assert dict(zip(losses, weights)) == {"burst_bce": 2.0, "peak_amp_nmse": 0.5}
 
     metrics, _ = RadioBurstMetrics("val_metrics")(preds, target)
     assert set(metrics) == {"burst_f1", "peak_amp_rrse"}
     assert set(losses).isdisjoint(metrics)
+
+
+def test_nmse_normalizes_a_high_variance_target():
+    """This is the actual bug being fixed: peak_amp's target variance can be ~10,000x
+    burst_bce's scale (observed in training logs), which swamped the combined loss even
+    at a small peak_amp_weight. NMSE should bring it back to the same order as raw MSE
+    divided by that variance, not the raw MSE itself.
+
+    Needs enough burst rows that the masked target's variance is itself a meaningful
+    estimate rather than hitting the ``clamp_min(1.0)`` floor (see
+    ``test_nmse_floors_variance_for_a_single_burst_row`` for that regime) — 8 rows of
+    independent, large-scale noise is plenty.
+    """
+    torch.manual_seed(0)
+    high_variance_spectra = torch.randn(8, 3, 4) * 100.0  # per-sample variance ~10,000
+    preds = {"burst_prob": torch.full((8, 1), 0.5), "peak_amp": torch.zeros(8, 1)}
+    target = {"burst": torch.ones(8, dtype=torch.long), "spectra": high_variance_spectra}
+
+    losses, _ = RadioBurstMetrics("train_loss")(preds, target)
+
+    peak_amp_target = high_variance_spectra.amax(dim=(-2, -1)).unsqueeze(-1)
+    raw_mse = torch.nn.functional.mse_loss(preds["peak_amp"], peak_amp_target)
+    expected_variance = peak_amp_target.var(unbiased=False).clamp_min(1.0)
+    assert expected_variance > 1.0  # sanity: this case must exercise real normalization
+
+    assert torch.allclose(losses["peak_amp_nmse"], raw_mse / expected_variance)
+    # The whole point: a huge raw target scale (~10,000, matching what was observed in
+    # training logs) collapses to a loss of order 1-10 once divided by its own variance,
+    # instead of dominating burst_bce by four orders of magnitude.
+    assert raw_mse > 1000
+    assert losses["peak_amp_nmse"] < raw_mse / 100
+
+
+def test_nmse_floors_variance_for_a_single_burst_row():
+    """A single burst row gives peak_amp a one-element masked target: variance is exactly
+    0, and dividing by an epsilon there (instead of flooring at 1.0) would turn ordinary
+    prediction error into an arbitrarily large loss spike. This is a realistic case at
+    the shipped batch_size: 2.
+    """
+    preds = {"burst_prob": torch.full((1, 1), 0.5), "peak_amp": torch.tensor([[5.0]])}
+    target = {"burst": torch.tensor([1]), "spectra": torch.zeros(1, 3, 4)}  # peak_amp target = 0
+
+    losses, _ = RadioBurstMetrics("train_loss")(preds, target)
+
+    assert torch.allclose(losses["peak_amp_nmse"], torch.tensor(25.0))  # (5 - 0)^2 / 1.0
+
+
+def test_peak_amp_scale_fixes_the_single_burst_row_case_the_floor_does_not():
+    """The floor above only stops the loss from *exploding* on a 1-burst-row batch — it
+    still silently falls back to raw (thousands-scale) MSE, which is the actual reported
+    bug: at batch_size=2 and a realistic burst rate, most non-empty batches have exactly
+    one burst row, so the per-batch estimate degrades to plain MSE almost every step, not
+    as a rare edge case. Passing a fixed peak_amp_scale (fit once over many burst rows,
+    e.g. via spectra_transform.compute_peak_amp_scale) is what actually fixes it, even
+    when the batch itself only has one row to offer.
+    """
+    peak_amp_target = 90.0  # order of magnitude observed for real standardized peak_amp
+    preds = {"burst_prob": torch.full((1, 1), 0.5), "peak_amp": torch.zeros(1, 1)}
+    target = {
+        "burst": torch.tensor([1]),
+        "spectra": torch.full((1, 3, 4), peak_amp_target),
+    }
+    fixed_scale = 8000.0  # a population variance fit elsewhere, not from this batch
+
+    unfixed, _ = RadioBurstMetrics("train_loss")(preds, target)
+    fixed, _ = RadioBurstMetrics("train_loss", peak_amp_scale=fixed_scale)(preds, target)
+
+    assert unfixed["peak_amp_nmse"] == pytest.approx(peak_amp_target**2)  # floor: raw MSE
+    assert fixed["peak_amp_nmse"] == pytest.approx(peak_amp_target**2 / fixed_scale)
+    assert fixed["peak_amp_nmse"] < unfixed["peak_amp_nmse"] / 100

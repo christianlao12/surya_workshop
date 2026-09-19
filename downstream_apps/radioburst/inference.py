@@ -17,7 +17,7 @@ and each gets one function here:
 What the prediction means: with ``ds_forecast_horizon: 3h`` and 1-hour catalog windows, a
 frame at time ``t`` forecasts a burst in ``[t + 3h, t + 4h]``, and the predicted
 spectrogram spans those 60 minutes. Spectrogram values come back in the normalized space
-of ``spectra_transform`` — use :class:`~downstream_apps.radioburst.spectra_transform.SpectraLog10Normalizer.inverse`
+of ``spectra_transform`` — use :class:`~downstream_apps.radioburst.spectra_transform.SpectraTemplateNormalizer.inverse`
 to read them as flux.
 """
 
@@ -38,7 +38,7 @@ from downstream_apps.radioburst.models.simple_baseline import (
     TwoStageBurstModel,
     destandardize_channels,
 )
-from downstream_apps.radioburst.spectra_transform import SpectraLog10Normalizer
+from downstream_apps.radioburst.spectra_transform import SpectraTemplateNormalizer
 from workshop_infrastructure.datasets.helio import HelioNetCDFDataset
 
 # The config -> HelioNetCDFDataset argument mapping lives in workshop_infrastructure and is
@@ -309,10 +309,10 @@ def load_baseline_model(cfg, ckpt_path, device: str | torch.device | None = None
 
     Like the Surya loader, the model's shape is read out of the checkpoint rather than
     rebuilt from the config: ``classifier.weight`` gives the flattened input width
-    (``2 * n_channels * n_timesteps``) and the ``normalized_template`` buffer gives the
-    spectrogram's ``(T, F)``. The template is therefore restored from the checkpoint too,
-    so reloading does not depend on the catalog's template CSV still being there, or still
-    holding what it held during training.
+    (``2 * n_channels * n_timesteps``). The model no longer carries a copy of the median
+    template (see ``TwoStageBurstModel``'s docstring) — that lives entirely in the
+    ``SpectraTemplateNormalizer`` sidecar/catalog fit, loaded separately via
+    :func:`load_spectra_normalizer`.
 
     Args:
         cfg: Unused today, accepted so this matches ``load_finetuned_burst_model``'s shape
@@ -329,15 +329,14 @@ def load_baseline_model(cfg, ckpt_path, device: str | torch.device | None = None
     state_dict = _strip_lightning_prefix(checkpoint["state_dict"])
     try:
         input_dim = state_dict["classifier.weight"].shape[1]
-        spectrum_shape = tuple(state_dict["normalized_template"].shape)
     except KeyError as missing:
         raise KeyError(
             f"{missing} is not in this checkpoint, so it is not a TwoStageBurstModel. "
             "Did you pass a fine-tuning checkpoint (finetune-*.ckpt) by mistake?"
         ) from None
 
-    model = TwoStageBurstModel(input_dim, np.zeros(spectrum_shape, dtype=np.float32))
-    model.load_state_dict(state_dict, strict=True)  # also restores normalized_template
+    model = TwoStageBurstModel(input_dim)
+    model.load_state_dict(state_dict, strict=True)
     return model.to(device).eval()
 
 
@@ -359,9 +358,12 @@ def predict_baseline(model, batch: dict, cfg, scalers, device=None) -> dict:
 
     Returns:
         ``burst_probability`` ``(B,)`` — already a sigmoid inside the model, unlike the
-        Surya head's logit — ``peak_amp`` ``(B,)`` and ``spectra`` ``(B, T, F)``. The
-        spectrogram is ``peak_amp`` times a fixed template, in **raw flux units**: the
-        baseline is trained against untransformed targets, so nothing has to be inverted.
+        Surya head's logit — ``peak_amp`` ``(B,)`` in standardized space, and ``spectra``
+        ``(B, 1, 1)``: ``peak_amp`` broadcast, still in standardized space. As with
+        :func:`predict`, pass ``spectra`` through
+        :meth:`~downstream_apps.radioburst.spectra_transform.SpectraTemplateNormalizer.inverse`
+        to reconstruct the full ``(B, T, F)`` raw-flux spectrogram — the template shape is
+        added back there, not by this model.
     """
     if device is None:
         device = next(model.parameters()).device
@@ -417,7 +419,7 @@ def find_catalog_window(cfg, window_start, tolerance=None) -> pd.Series | None:
 SPECTRA_NORM_FILENAME = "spectra_norm.json"
 
 
-def load_spectra_normalizer(cfg, ckpt_path=None) -> SpectraLog10Normalizer:
+def load_spectra_normalizer(cfg, ckpt_path=None) -> SpectraTemplateNormalizer:
     """Get the constants needed to read a prediction as flux.
 
     Prefers the ``spectra_norm.json`` a training run saved next to its checkpoint, because
@@ -431,12 +433,15 @@ def load_spectra_normalizer(cfg, ckpt_path=None) -> SpectraLog10Normalizer:
         ckpt_path: The checkpoint being used; its folder is searched for the sidecar.
 
     Returns:
-        The normalizer, with :meth:`SpectraLog10Normalizer.inverse` ready to use.
+        The normalizer, with :meth:`SpectraTemplateNormalizer.inverse` ready to use. This
+        is what both :func:`predict` and :func:`predict_baseline` need to turn a
+        standardized-space "spectra" output back into flux — neither model predicts raw
+        flux directly any more.
     """
     if ckpt_path is not None:
         sidecar = Path(ckpt_path).parent / SPECTRA_NORM_FILENAME
         if sidecar.exists():
-            return SpectraLog10Normalizer.from_json(sidecar)
+            return SpectraTemplateNormalizer.from_json(sidecar)
 
     warnings.warn(
         f"No {SPECTRA_NORM_FILENAME} beside the checkpoint — re-fitting the spectra "
@@ -445,7 +450,7 @@ def load_spectra_normalizer(cfg, ckpt_path=None) -> SpectraLog10Normalizer:
         "that run; if they are not, predicted flux values are silently rescaled.",
         stacklevel=2,
     )
-    return SpectraLog10Normalizer.fit_from_catalog(cfg)
+    return SpectraTemplateNormalizer.fit_from_catalog(cfg)
 
 
 def spectrogram_axes(template_path) -> tuple[np.ndarray, np.ndarray]:

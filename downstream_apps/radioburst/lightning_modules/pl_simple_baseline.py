@@ -17,13 +17,16 @@ Intended use:
 Key batch contract:
   - batch["ts"]          : torch.Tensor input stack (e.g., [B, C, T, H, W])
   - batch["burst"]       : torch.Tensor 0/1 burst label (e.g., [B])
-  - batch["diagnostics"] : torch.Tensor peak_amp regression target, shape [B, 1]
-                            (narrowed via ds_diagnostics_columns: [peak_amp] in the
-                            config); NaN in rows where burst == 0. Compared against the
-                            linear baseline's "peak_amp" output by RadioBurstMetrics.
+  - batch["diagnostics"] : torch.Tensor catalog peak_amp column, shape [B, 1] (narrowed
+                            via ds_diagnostics_columns: [peak_amp] in the config); NaN in
+                            rows where burst == 0. Carried through for reporting only —
+                            RadioBurstMetrics derives its own standardized peak_amp target
+                            from batch["spectra"] instead (see radioburst_metrics.py).
   - batch["spectra"]     : torch.Tensor radio spectrogram target, shape [B, T, F].
                             Compared against HelioSpectformerBurst's "spectra" output by
-                            RadioBurstSpectraMetrics.
+                            RadioBurstSpectraMetrics, and (via a derived per-sample max)
+                            against the linear baseline's "peak_amp" output by
+                            RadioBurstMetrics.
 
 All three targets are passed to the metrics in one dict; each metrics class reads only the
 keys its model predicts.

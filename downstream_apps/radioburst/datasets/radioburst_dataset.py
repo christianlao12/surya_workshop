@@ -3,7 +3,7 @@ import pandas as pd
 from pathlib import Path
 from typing import Callable, Literal
 
-from downstream_apps.radioburst.spectra_transform import read_spectra_file
+from downstream_apps.radioburst.spectra_transform import load_median_template, read_spectra_file
 from workshop_infrastructure.datasets.helio import HelioNetCDFDataset
 
 
@@ -126,9 +126,7 @@ class RadioBurstDSDataset(HelioNetCDFDataset):
             self.ds_index["normalized_spectra"] = raw_spectra
 
         self.median_spectra_template = (
-            pd.read_csv(self.ds_radioburst_folder_path / ds_spectra_template_file)
-            .iloc[:, 1:]
-            .to_numpy(dtype=np.float32)
+            load_median_template(self.ds_radioburst_folder_path, ds_spectra_template_file)
             if ds_spectra_template_file
             else None
         )
