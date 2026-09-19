@@ -15,6 +15,7 @@ import torch
 from tiny_models import EMBED_DIM, IMG_SIZE, IN_CHANS, PATCH_SIZE, make_batch
 
 from downstream_apps.radioburst.inference import (
+    classification_metrics,
     find_catalog_window,
     head_geometry,
     load_baseline_model,
@@ -443,3 +444,29 @@ def test_find_catalog_window_defaults_to_the_configs_tolerance(tmp_path):
     cfg = make_catalog_cfg(tmp_path, [("2014-01-21 06:00:00", 1)], tolerance="30m")
     assert find_catalog_window(cfg, "2014-01-21 05:00") is None
     assert find_catalog_window(cfg, "2014-01-21 05:00", tolerance="2h") is not None
+
+
+# --------------------------------------------------------------------------------------
+# Batch evaluation metrics
+# --------------------------------------------------------------------------------------
+
+
+def test_classification_metrics_perfect_prediction():
+    metrics = classification_metrics([1, 1, 0, 0], [1, 1, 0, 0])
+    assert (metrics["tp"], metrics["fp"], metrics["tn"], metrics["fn"]) == (2, 0, 2, 0)
+    assert metrics["precision"] == metrics["recall"] == metrics["f1"] == metrics["hss"] == 1.0
+
+
+def test_classification_metrics_all_wrong():
+    metrics = classification_metrics([1, 1, 0, 0], [0, 0, 1, 1])
+    assert (metrics["tp"], metrics["fp"], metrics["tn"], metrics["fn"]) == (0, 2, 0, 2)
+    assert metrics["precision"] == metrics["recall"] == 0.0
+    assert metrics["f1"] == 0.0
+    assert metrics["hss"] == -1.0
+
+
+def test_classification_metrics_precision_is_nan_with_no_predicted_positives():
+    metrics = classification_metrics([1, 0], [0, 0])
+    assert np.isnan(metrics["precision"])
+    assert metrics["recall"] == 0.0
+    assert np.isnan(metrics["f1"])

@@ -318,12 +318,17 @@ def load_baseline_model(cfg, ckpt_path, device: str | torch.device | None = None
         cfg: Unused today, accepted so this matches ``load_finetuned_burst_model``'s shape
             and stays the obvious place to add config-driven behavior.
         ckpt_path: The ``baseline-*.ckpt`` written by ``ModelCheckpoint``.
-        device: Where to put the model. CPU by default — the baseline is two linear layers.
+        device: Where to put the model. CUDA when available, else CPU — the classifier
+            itself is two linear layers, but the mean/std reduction in ``forward()`` runs
+            over the full 4096x4096 image stack, which is what benefits from a GPU,
+            especially across the batch-evaluation loop's many events.
 
     Returns:
         The model in ``eval()`` mode on ``device``.
     """
-    device = torch.device(device) if device is not None else torch.device("cpu")
+    device = torch.device(device) if device is not None else (
+        torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+    )
 
     checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     state_dict = _strip_lightning_prefix(checkpoint["state_dict"])
@@ -473,3 +478,46 @@ def spectrogram_axes(template_path) -> tuple[np.ndarray, np.ndarray]:
         [float(str(col).split("_")[0]) for col in template.columns[1:]], dtype=np.float64
     )
     return minutes, frequencies
+
+
+def classification_metrics(y_true, y_pred) -> dict:
+    """Confusion matrix and derived scores for a batch of burst/quiet predictions.
+
+    HSS (Heidke Skill Score) isn't in torchmetrics or sklearn, so it's computed directly
+    from the confusion matrix: 2*(TP*TN - FP*FN) / [(TP+FN)(FN+TN) + (TP+FP)(FP+TN)].
+
+    Precision and recall are NaN when their denominator is 0 (no predicted positives, or no
+    actual positives) rather than silently 0 — a model that never predicts a burst has an
+    undefined precision, not a precision of zero. F1 propagates that NaN, except when
+    precision and recall are both a well-defined 0 (some predictions, all wrong), where it is
+    the ordinary 0.0 rather than NaN.
+
+    Args:
+        y_true: Ground-truth burst labels (0/1), any array-like.
+        y_pred: Predicted burst labels (0/1), same length.
+
+    Returns:
+        dict with tp, fp, tn, fn (int) and precision, recall, f1, hss (float, possibly NaN).
+    """
+    y_true = np.asarray(y_true).astype(int)
+    y_pred = np.asarray(y_pred).astype(int)
+    tp = int(np.sum((y_true == 1) & (y_pred == 1)))
+    fp = int(np.sum((y_true == 0) & (y_pred == 1)))
+    tn = int(np.sum((y_true == 0) & (y_pred == 0)))
+    fn = int(np.sum((y_true == 1) & (y_pred == 0)))
+
+    def safe_div(n, d):
+        return n / d if d else float("nan")
+
+    precision = safe_div(tp, tp + fp)
+    recall = safe_div(tp, tp + fn)
+    if np.isnan(precision) or np.isnan(recall):
+        f1 = float("nan")
+    elif precision + recall == 0:
+        f1 = 0.0
+    else:
+        f1 = 2 * precision * recall / (precision + recall)
+    hss = safe_div(2 * (tp * tn - fp * fn), (tp + fn) * (fn + tn) + (tp + fp) * (fp + tn))
+
+    return {"tp": tp, "fp": fp, "tn": tn, "fn": fn,
+            "precision": precision, "recall": recall, "f1": f1, "hss": hss}
