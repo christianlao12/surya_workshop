@@ -1,5 +1,9 @@
 # =============================================================================
-# Surya workshop — template fine-tuning config
+# Surya workshop — Type II radio-burst forecasting config
+#
+# Task: from one SDO frame at issue time t, predict whether a Type II burst (and an
+# interplanetary-reaching one) starts in (t, t + 24 h]. Data files are built by
+#   python -m downstream_apps.radioburst.prepare_data
 #
 # Five sections own all parameters:
 #   data      — what to load and how to align labels
@@ -17,14 +21,14 @@
 #     add the field to your DataConfig subclass in configs.py first.
 #
 # Usage — --config defaults to this file, so the short form is enough:
-#   CUDA_VISIBLE_DEVICES=0,1 python -m downstream_apps.template.3_finetune_template_1D
+#   CUDA_VISIBLE_DEVICES=0,1 python -m downstream_apps.radioburst.3_finetune_template_1D
 #
 # Per-run overrides that do not require editing this file:
 #   --max-epochs 5     --batch-size 4     --s3-cache-dir /scratch/$USER/cache
 #   --deterministic warn   (reproducible run; see training.deterministic below)
 # =============================================================================
 
-job_id: radio_burst_forecasting
+job_id: typeii_forecast
 
 
 # -----------------------------------------------------------------------------
@@ -32,8 +36,12 @@ job_id: radio_burst_forecasting
 # -----------------------------------------------------------------------------
 data:
   # -- Paths (relative to this file's directory) --
-  train_data_path: ../../../data/indices/surya_aws_s3_train.csv
-  valid_data_path: ../../../data/indices/surya_aws_s3_val.csv
+  # The splits are this app's own (see prepare_data.py), not the repo-wide Surya indices:
+  # train/val are solar rotations of 2010-2019, test is 2020-2024 (Solar Cycle 25, unseen
+  # by Surya's pretraining). One frame every 6 h.
+  train_data_path: ../data/splits/train.csv
+  valid_data_path: ../data/splits/val.csv
+  test_data_path: ../data/splits/test.csv   # evaluate.py only — never used for training
   scalers_path: ../assets/scalers.yaml
 
   # -- Input channels and temporal sampling --
@@ -42,25 +50,13 @@ data:
   time_delta_input_minutes: [0]   # Offsets (minutes) of input frames relative to reference timestep
   time_delta_target_minutes: 60   # Step size (minutes) between forecast frames
 
-  # -- Downstream label alignment (flare catalog → Surya index) --
-  ds_radioburst_folder_path: /home/jovyan/scratch_space/clao/Data/
-  ds_radioburst_index_file: SuryaWorkshopIndex.csv
-  ds_time_column: window_start    # Column in the radio burst catalog used as the event timestamp
-  ds_forecast_horizon: 3h         # Lead time: Surya frame is taken at least this long before window_start
-  ds_time_tolerance: 30m           # ...and at most this much earlier still (lead in [3h, 3h30m])
-  ds_match_direction: forward     # "forward": use solar state *before* the flare (causal)
-  ds_spectra_column: window_start_file # Column in the radio burst catalog showing file
-  ds_spectra_template_file: burst_data/Burst_Median_Spectrum.csv
-    # Precomputed median burst-spectrogram template, inside ds_radioburst_folder_path, used
-    # by SpectraTemplateNormalizer (spectra_transform.py) to standardize the spectra target
-    # relative to the typical burst shape. TwoStageBurstModel and HelioSpectformerBurst both
-    # predict in that standardized space; neither carries its own copy of the template.
-    # See downstream_apps/radioburst/compute_median_template.py.
-  ds_diagnostics_columns: [peak_amp]
-    # Catalog column packed into the diagnostics regression target, for reporting only:
-    # RadioBurstMetrics derives its own standardized peak_amp training target from the
-    # spectra target instead (see radioburst_metrics.py), robust to real bursts deviating
-    # from the idealized template shape.
+  # -- Labels (Type II events → yes/no per issue time) --
+  ds_events_path: ../data/typeii_events.csv   # one row per onset, from the CDAW DH Type II catalog
+  ds_flares_path: ../data/mx_flares.csv       # evaluate.py baseline only
+  ds_horizon: 24h                 # positive if an onset falls in (t, t + 24h]; keep in sync with prepare_data.HORIZON
+  ds_negative_ratio: 3            # train only: keep 3 negatives per positive (~2,000 frames, ~2 TB).
+                                  # null keeps all 10,591 train frames (~11 TB). val/test are never subsampled.
+  ds_exclude_behind_limb: false   # true drops samples whose window holds a behind-the-limb onset
 
   # -- Local data (only needed when the index contains relative local paths) --
   # sdo_data_root_path: /path/to/sdo   # Prepended to relative local paths; ignored for s3://
@@ -112,7 +108,7 @@ data:
   s3_boto3_part_size_mb: 64       # part size in MB (benchmark default: 64)
 
   # -- Development --
-  max_samples: 20                 # Cap dataset size for quick experiments (null = all samples)
+  max_samples: null               # Cap dataset size for quick experiments, e.g. 10 (null = all samples)
 
 
 # -----------------------------------------------------------------------------
@@ -229,5 +225,5 @@ output:
 # Logging
 # -----------------------------------------------------------------------------
 logging:
-  wandb_project: radioburst_classification
+  wandb_project: radioburst_typeii
   wandb_entity: surya-ws2  # WandB team/org name; null to log to your personal account

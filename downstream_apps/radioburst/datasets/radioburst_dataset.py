@@ -1,215 +1,102 @@
+"""
+Dataset for 24 h Type II radio-burst forecasting.
+
+Each sample is one Surya frame at an issue time t (00/06/12/18 UTC, see prepare_data.py)
+and two yes/no labels:
+
+    type2     — a Type II burst starts in (t, t + horizon]
+    type2_ip  — an interplanetary-reaching Type II (ends below 1 MHz) starts in that window
+
+The labels are nested: every type2_ip positive is also a type2 positive. Their exact
+definition lives in ``labels.py``.
+"""
+
+from __future__ import annotations
+
 import numpy as np
 import pandas as pd
-from pathlib import Path
-from typing import Callable, Literal
 
-from downstream_apps.radioburst.spectra_transform import load_median_template, read_spectra_file
+from downstream_apps.radioburst.labels import make_labels, onset_in_window
 from workshop_infrastructure.datasets.helio import HelioNetCDFDataset
 
 
-class RadioBurstDSDataset(HelioNetCDFDataset):
-    """
-    Template child class of HelioNetCDFDataset showing how to build a downstream dataset.
-    Extends the base class with a burst label and radio spectra aligned to the Surya index.
+class TypeIIDataset(HelioNetCDFDataset):
+    """HelioNetCDFDataset plus the two Type II labels.
 
-    All ``HelioNetCDFDataset`` keyword arguments (``index_path``, ``scalers``, ``channels``,
-    ``s3_cache_dir``, etc.) are accepted via ``**kwargs`` and forwarded to the base class.
-    ``load_forecast_frames`` defaults to ``False`` here (the radio-burst catalog supplies
-    its own labels, so future Surya frames are never fetched); pass it explicitly to override.
+    The index CSV already holds exactly the issue times (``prepare_data.py`` writes one
+    frame every 6 h), so the issue time *is* the frame time: no timestamp matching, and the
+    input can never come from after the issue time. Only the frame at offset 0 is loaded.
 
-    Additional Args:
-        return_surya_stack: If True (default), include the Surya image stack in the returned dict.
-            Set to False to return only the burst label and spectra (useful for label inspection).
-        max_number_of_samples: Cap the dataset length at this value. Useful for quick experiments.
-        ds_radioburst_folder_path: Path to the folder containing the radio burst index and spectra.
-        ds_radioburst_index_file: Filename of the radio burst CSV index, inside
-            ``ds_radioburst_folder_path``.
-        ds_time_column: Column name in the radio-burst catalog to use as the event timestamp.
-        ds_forecast_horizon: Lead time between the Surya frame and the catalog timestamp
-            (e.g., ``"3h"``). Catalog timestamps are shifted back by this amount before
-            matching, so with ``ds_match_direction="forward"`` the Surya frame is at least
-            this long before ``ds_time_column``. ``"0h"`` (default) matches without a lead.
-        ds_time_tolerance: Maximum allowed time offset when matching Surya and DS indices
-            (e.g., ``"15min"``), measured after the ``ds_forecast_horizon`` shift. With
-            ``"forward"`` matching the lead time therefore lies in
-            ``[ds_forecast_horizon, ds_forecast_horizon + ds_time_tolerance]``. Unmatched
-            entries are dropped.
-        ds_match_direction: Merge direction passed to ``pd.merge_asof``. Use ``"forward"``
-            for causal prediction (predict bursts from prior solar state).
-        ds_spectra_column: Location of the file of the spectra of the radio burst in the data folder.
-        spectra_transform: Optional callable applied to the ``ds_spectra_column`` files (loaded and
-            stacked into a ``pd.Series`` of arrays) to produce the ``normalized_spectra`` column.
-            Signature: ``(spectra: pd.Series) -> pd.Series``. If ``None``, raw flux values are used
-            as-is. Applied once, over the full catalog, before it is matched/split against the
-            Surya index — so train and val ``RadioBurstDSDataset`` instances (each loading the same
-            full catalog file) end up with identical statistics. Define this at the call site (see
-            ``0_dataset_dataloader_template.ipynb``) to keep normalization logic out of the dataset
-            class, mirroring ``label_transform`` in ``downstream_apps/template``.
-        ds_diagnostics_columns: Optional list of catalog column names holding per-burst diagnostic
-            measurements (e.g. ``["peak_amp", "energy", "f_centroid", "f_spread", "t_spread"]``) to
-            expose as a regression target. If ``None`` (default), no diagnostics tuple is returned.
-        ds_spectra_template_file: Optional filename, inside ``ds_radioburst_folder_path``, of a
-            precomputed median burst-spectrogram template (see
-            ``downstream_apps/radioburst/compute_median_template.py``). If given, loaded once
-            into ``self.median_spectra_template`` — a ``(T, F)`` array with the leading
-            non-value column dropped by position, matching the ``ds_spectra_column`` loader
-            below. If ``None`` (default), ``self.median_spectra_template`` is ``None``.
-    Raises:
-        ValueError: If ``ds_radioburst_folder_path`` or ``ds_radioburst_index_file`` is not
-            provided, or if no overlap exists between the Surya and DS indices within the
-            specified tolerance.
+    Args:
+        ds_events_path: CSV with one row per onset (``onset``, ``reaches_ip``, ``behind_limb``).
+        ds_horizon: Label window length, e.g. ``"24h"``.
+        ds_negative_ratio: Negatives kept per positive (``type2``), applied only when
+            ``phase == "train"``. Validation and test keep the natural event rate so their
+            scores stay honest. ``None`` keeps every sample.
+        ds_exclude_behind_limb: Drop samples whose window contains a behind-the-limb onset.
+            They are not relabelled as negatives: the Sun really did produce a Type II.
+        subsample_seed: Seed for the negative subsampling, so the kept set is reproducible.
+        max_number_of_samples: Cap the dataset length (quick experiments).
+        return_surya_stack: If False, skip loading SDO data and return labels only.
+        **kwargs: Every ``HelioNetCDFDataset`` argument (``index_path``, ``scalers``, ...).
     """
 
     def __init__(
         self,
-        # Downstream-specific parameters
-        return_surya_stack: bool = True,
+        ds_events_path: str,
+        ds_horizon: str = "24h",
+        ds_negative_ratio: float | None = None,
+        ds_exclude_behind_limb: bool = False,
+        subsample_seed: int = 0,
         max_number_of_samples: int | None = None,
-        ds_radioburst_folder_path: str | None = None,
-        ds_radioburst_index_file: str | None = None,
-        ds_time_column: str | None = None,
-        ds_forecast_horizon: str = "0h",
-        ds_time_tolerance: str | None = None,
-        ds_match_direction: Literal["forward", "backward", "nearest"] = "forward",
-        ds_spectra_column: str | None = None,
-        spectra_transform: Callable[[pd.Series], pd.Series] | None = None,
-        ds_diagnostics_columns: list[str] | None = None,
-        ds_spectra_template_file: str | None = None,
-        # All HelioNetCDFDataset parameters (index_path, scalers, channels, s3_*, etc.)
+        return_surya_stack: bool = True,
         **kwargs,
     ):
-        if ds_match_direction not in ["forward", "backward", "nearest"]:
-            raise ValueError("ds_match_direction must be one of 'forward', 'backward', or 'nearest'")
-
-        # load_forecast_frames defaults to False here: the radio-burst catalog supplies
-        # its own labels, so future Surya frames never need to be fetched from disk/S3.
+        # The labels come from the event list, so future Surya frames are never needed.
         kwargs.setdefault("load_forecast_frames", False)
         super().__init__(**kwargs)
-
         self.return_surya_stack = return_surya_stack
 
-        # Load ds index and find intersection with Surya index
-        if ds_radioburst_folder_path is None or ds_radioburst_index_file is None:
-            raise ValueError("ds_radioburst_folder_path and ds_radioburst_index_file must be provided for RadioBurstDSDataset")
-        self.ds_radioburst_folder_path = Path(ds_radioburst_folder_path)
-        self.ds_spectra_column = ds_spectra_column
-        self.ds_diagnostics_columns = ds_diagnostics_columns
-        self.ds_index = pd.read_csv(self.ds_radioburst_folder_path / ds_radioburst_index_file)
+        events = pd.read_csv(ds_events_path, parse_dates=["onset"])
+        issue = pd.DatetimeIndex(self.valid_indices)
+        labels = make_labels(events, issue, ds_horizon)
 
-        if self.ds_diagnostics_columns is not None:
-            missing = set(self.ds_diagnostics_columns) - set(self.ds_index.columns)
-            if missing:
-                raise ValueError(
-                    f"ds_diagnostics_columns not found in catalog: {sorted(missing)}"
-                )
+        if ds_exclude_behind_limb:
+            hidden = onset_in_window(events.loc[events.behind_limb == 1, "onset"], issue, ds_horizon)
+            labels = labels[~hidden]
 
-        # Shift each event back by the forecast horizon, so the Surya frame matched to it
-        # below precedes the event by at least that much.
-        self.ds_index["ds_index"] = pd.to_datetime(
-            self.ds_index[ds_time_column]
-        ).values.astype("datetime64[ns]") - pd.Timedelta(ds_forecast_horizon)
-        self.ds_index.sort_values("ds_index", inplace=True)
+        if ds_negative_ratio is not None and self.phase == "train":
+            labels = self._subsample_negatives(labels, ds_negative_ratio, subsample_seed)
 
-        # Load every spectra file referenced by the full catalog and apply spectra_transform
-        # once, here, over the whole column - before the merge_asof split below narrows
-        # ds_index down to this particular phase's matched rows. Both the train and val
-        # RadioBurstDSDataset instances load and transform this same full catalog file, so
-        # they end up with identical statistics even though spectra_transform sees the
-        # entire (train + val) population - mirroring how label_transform is applied to
-        # FlareDSDataset's "intensity" column in downstream_apps/template.
-        raw_spectra = self.ds_index[ds_spectra_column].apply(
-            lambda p: read_spectra_file(self.ds_radioburst_folder_path, p)
-        )
-        if spectra_transform is not None:
-            self.ds_index["normalized_spectra"] = spectra_transform(raw_spectra)
-        else:
-            self.ds_index["normalized_spectra"] = raw_spectra
+        if max_number_of_samples is not None:
+            labels = labels.iloc[:max_number_of_samples]
 
-        self.median_spectra_template = (
-            load_median_template(self.ds_radioburst_folder_path, ds_spectra_template_file)
-            if ds_spectra_template_file
-            else None
-        )
+        self.labels = labels
+        self.valid_indices = list(labels.index)
+        self.adjusted_length = len(labels)
 
-        # Create Surya valid indices and find closest match to DS index
-        self.df_valid_indices = pd.DataFrame(
-            {"valid_indices": self.valid_indices}
-        ).sort_values("valid_indices")
-        self.df_valid_indices = pd.merge_asof(
-            self.df_valid_indices,
-            self.ds_index,
-            right_on="ds_index",
-            left_on="valid_indices",
-            direction=ds_match_direction,
-        )
-        # Remove duplicates keeping closest match
-        self.df_valid_indices["index_delta"] = np.abs(
-            self.df_valid_indices["valid_indices"] - self.df_valid_indices["ds_index"]
-        )
-        self.df_valid_indices = self.df_valid_indices.sort_values(
-            ["ds_index", "index_delta"]
-        )
-        self.df_valid_indices.drop_duplicates(
-            subset="ds_index", keep="first", inplace=True
-        )
-        # Enforce a maximum time tolerance for matches
-        if ds_time_tolerance is not None:
-            self.df_valid_indices = self.df_valid_indices.loc[
-                self.df_valid_indices["index_delta"] <= pd.Timedelta(ds_time_tolerance),
-                :,
-            ]
-            if len(self.df_valid_indices) == 0:
-                raise ValueError("No intersection between Surya and DS indices")
+    @staticmethod
+    def _subsample_negatives(labels: pd.DataFrame, ratio: float, seed: int) -> pd.DataFrame:
+        """Keep every positive and ``ratio`` negatives per positive, chosen at random."""
+        positive = labels["type2"] == 1
+        negatives = labels.index[~positive]
+        n_keep = min(len(negatives), int(round(ratio * positive.sum())))
+        kept = np.random.default_rng(seed).choice(negatives, size=n_keep, replace=False)
+        return labels[positive | labels.index.isin(kept)]
 
-        # Override valid indices variables to reflect matches between Surya and DS
-        self.valid_indices = [
-            pd.Timestamp(date) for date in self.df_valid_indices["valid_indices"]
-        ]
-        self.adjusted_length = len(self.valid_indices)
-        self.df_valid_indices.set_index("valid_indices", inplace=True)
-
-        if max_number_of_samples is not None and max_number_of_samples < self.adjusted_length:
-            self.valid_indices = self.valid_indices[:max_number_of_samples]
-            self.df_valid_indices = self.df_valid_indices.iloc[:max_number_of_samples]
-            self.adjusted_length = max_number_of_samples
-
-    def __len__(self):
+    def __len__(self) -> int:
         return self.adjusted_length
 
     def __getitem__(self, idx: int) -> dict:
         """
-        Args:
-            idx: Dataset index.
-
-        Returns:
-            Dictionary containing:
-                burst (np.int64): Burst label from the ``burst`` column (1 = burst
-                    window, 0 = quiet window).
-                spectra (np.ndarray[float32]): Radio spectra loaded from the file named in
-                    ``ds_spectra_column``, shape (n_timesteps, n_bins), with the ``time``
-                    column dropped, and passed through ``spectra_transform`` if one was given
-                    at construction time (raw flux values otherwise).
-                ds_index (str): ISO-format timestamp from the radioburst index.
-                diagnostics (np.ndarray[float32]): Only present when ``ds_diagnostics_columns``
-                    was given at construction time. Shape ``(len(ds_diagnostics_columns),)``.
-                    Per-burst diagnostic measurements (e.g. peak amplitude, energy, frequency
-                    centroid/spread, time spread) read from those catalog columns, in the given
-                    order, as a regression target. Returned as a single array (not a tuple) so
-                    the default ``DataLoader`` collate stacks samples into one ``(B, D)`` tensor
-                    instead of transposing into ``D`` separate length-``B`` tensors.
-                    ``NaN`` for quiet windows (``burst == 0``): the catalog has no burst to
-                    diagnose there, so these entries are undefined, not missing data to impute.
-                    Mask by ``burst`` before computing any loss over this target.
-            When ``return_surya_stack=True``, also includes all keys from
-            ``HelioNetCDFDataset.__getitem__`` (ts, time_delta_input, lead_time_delta, etc.).
+        Returns a dict with:
+            labels (np.ndarray[float32], shape (2,)): ``[type2, type2_ip]``, in
+                ``labels.LABELS`` order.
+            ds_index (str): the issue time, ISO format.
+        plus, when ``return_surya_stack`` is True, every key from
+        ``HelioNetCDFDataset.__getitem__`` (``ts``, ``time_delta_input``, ...).
         """
         sample = super().__getitem__(idx=idx) if self.return_surya_stack else {}
-        row = self.df_valid_indices.iloc[idx]
-        sample["burst"] = np.int64(row["burst"])
-        sample["spectra"] = row["normalized_spectra"]
-        if self.ds_diagnostics_columns is not None:
-            sample["diagnostics"] = np.array(
-                [row[col] for col in self.ds_diagnostics_columns], dtype=np.float32
-            )
-        sample["ds_index"] = self.df_valid_indices["ds_index"].iloc[idx].isoformat()
+        sample["labels"] = self.labels.iloc[idx].to_numpy(dtype=np.float32)
+        sample["ds_index"] = self.labels.index[idx].isoformat()
         return sample
