@@ -9,34 +9,19 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from tiny_models import (
-    DEPTH,
-    EMBED_DIM,
-    IMG_SIZE,
-    IN_CHANS,
-    N_SPECTRAL_BLOCKS,
-    PATCH_SIZE,
-    make_batch,
-)
+from tiny_models import IN_CHANS, make_batch, make_model
 from downstream_apps.radioburst.labels import LABELS
 from downstream_apps.radioburst.lightning_modules.pl_simple_baseline import TypeIILightningModule
 from downstream_apps.radioburst.metrics.radioburst_metrics import TypeIIMetrics, ValidationScores
 from downstream_apps.radioburst.models.simple_baseline import LinearTypeIIModel
 from workshop_infrastructure.configs import LoraAdapterConfig
-from workshop_infrastructure.models.finetune_models import HelioSpectformer1D
 from workshop_infrastructure.utils import apply_peft_lora
 
 MODES = ("train_loss", "val_loss", "train_metrics", "val_metrics")
 
 
-def make_surya(num_outputs=len(LABELS)):
-    return HelioSpectformer1D(
-        img_size=IMG_SIZE, patch_size=PATCH_SIZE, in_chans=IN_CHANS, embed_dim=EMBED_DIM,
-        time_embedding={"type": "linear", "time_dim": 1}, depth=DEPTH,
-        n_spectral_blocks=N_SPECTRAL_BLOCKS, num_heads=2, mlp_ratio=4, drop_rate=0.0,
-        window_size=2, dp_rank=2, dtype=torch.float32, pooling="class_token",
-        penultimate_linear_layer=True, num_outputs=num_outputs,
-    )
+def make_surya():
+    return make_model(num_outputs=len(LABELS))
 
 
 def labelled_batch(batch_size=2):

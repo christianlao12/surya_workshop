@@ -17,7 +17,7 @@ N_SPECTRAL_BLOCKS = 1  # -> 1 spectral block, 2 attention blocks
 N_ATTENTION_BLOCKS = DEPTH - N_SPECTRAL_BLOCKS
 
 
-def make_model(pooling="class_token", penultimate_linear_layer=True):
+def make_model(pooling="class_token", penultimate_linear_layer=True, num_outputs=1):
     return HelioSpectformer1D(
         img_size=IMG_SIZE,
         patch_size=PATCH_SIZE,
@@ -34,7 +34,7 @@ def make_model(pooling="class_token", penultimate_linear_layer=True):
         dtype=torch.float32,
         pooling=pooling,
         penultimate_linear_layer=penultimate_linear_layer,
-        num_outputs=1,
+        num_outputs=num_outputs,
     )
 
 

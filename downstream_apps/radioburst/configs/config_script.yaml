@@ -54,8 +54,9 @@ data:
   ds_events_path: ../data/typeii_events.csv   # one row per onset, from the CDAW DH Type II catalog
   ds_flares_path: ../data/mx_flares.csv       # evaluate.py baseline only
   ds_horizon: 24h                 # positive if an onset falls in (t, t + 24h]; keep in sync with prepare_data.HORIZON
-  ds_negative_ratio: 3            # train only: keep 3 negatives per positive (~2,000 frames, ~2 TB).
-                                  # null keeps all 10,591 train frames (~11 TB). val/test are never subsampled.
+  ds_negative_ratio: 3            # train only: keep 3 negatives per positive (~2,000 train frames).
+                                  # null keeps all 10,591. val (2,230) and test (7,132) are never
+                                  # subsampled. At ~1 GB/frame, train+val is ~4 TB at 3, ~13 TB at null.
   ds_exclude_behind_limb: false   # true drops samples whose window holds a behind-the-limb onset
 
   # -- Local data (only needed when the index contains relative local paths) --
