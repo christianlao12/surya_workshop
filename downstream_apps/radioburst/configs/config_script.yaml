@@ -5,12 +5,13 @@
 # interplanetary-reaching one) starts in (t, t + 24 h]. Data files are built by
 #   python -m downstream_apps.radioburst.prepare_data
 #
-# Five sections own all parameters:
+# Four sections own all parameters:
 #   data      — what to load and how to align labels
 #   model     — backbone architecture, fine-tuning head, LoRA
 #   training  — optimization and augmentation hyperparameters
 #   output    — where to save checkpoints (and optional S3 upload)
-#   logging   — experiment tracking (WandB)
+#
+# Metrics are logged locally only: runs/<job_id>_<surya|baseline>/version_N/metrics.csv
 #
 # Two things to know before editing:
 #
@@ -221,10 +222,3 @@ output:
   s3_prefix: ""           # Key prefix (folder) within the bucket, e.g. flare/exp_001
   s3_best_key: best.ckpt  # Stable object name; always points to the latest best checkpoint
 
-
-# -----------------------------------------------------------------------------
-# Logging
-# -----------------------------------------------------------------------------
-logging:
-  wandb_project: radioburst_typeii
-  wandb_entity: surya-ws2  # WandB team/org name; null to log to your personal account

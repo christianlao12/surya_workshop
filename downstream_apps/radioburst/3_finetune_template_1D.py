@@ -9,7 +9,7 @@ Train a 24 h Type II forecaster: the fine-tuned Surya model, or the linear basel
     CUDA_VISIBLE_DEVICES=0 python -m downstream_apps.radioburst.3_finetune_template_1D --train_baseline
 
     # Quick sanity run: set data.max_samples: 10 in the YAML, then
-    CUDA_VISIBLE_DEVICES=0 python -m downstream_apps.radioburst.3_finetune_template_1D --max-epochs 2 --no-wandb
+    CUDA_VISIBLE_DEVICES=0 python -m downstream_apps.radioburst.3_finetune_template_1D --max-epochs 2
 
 Build the data files first (once): ``python -m downstream_apps.radioburst.prepare_data``.
 
@@ -38,7 +38,7 @@ from typing import Tuple
 import torch
 import lightning as L
 from lightning.pytorch.callbacks import ModelCheckpoint
-from lightning.pytorch.loggers import CSVLogger, WandbLogger
+from lightning.pytorch.loggers import CSVLogger
 from torch.utils.data import DataLoader
 
 from downstream_apps.radioburst.configs import TrainingConfig, load_radioburst_config
@@ -71,9 +71,6 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default=str(DEFAULT_CONFIG),
                         help="Path to the run config YAML (default: this app's config_script.yaml).")
-    # Dev toggles: flip without editing the YAML
-    parser.add_argument("--no-wandb", action="store_true",
-                        help="Disable WandB logging (useful for local runs).")
     parser.add_argument("--train_baseline", action="store_true",
                         help="Train the linear baseline instead of the Surya model.")
     # Per-job / per-machine overrides: vary across runs without touching the YAML
@@ -161,22 +158,16 @@ def _log_trainable_parameters(model) -> None:
 def build_trainer(
     cfg: TrainingConfig,
     ckpt_prefix: str,
-    no_wandb: bool = False,
     max_epochs_override: int | None = None,
 ) -> Tuple[L.Trainer, ModelCheckpoint]:
-    """Configure loggers, callbacks, and the Lightning Trainer."""
+    """Configure the logger, callbacks, and the Lightning Trainer.
+
+    Metrics are logged locally only, to runs/<job_id>_<prefix>/version_N/metrics.csv
+    (hyperparameters, including negative_keep_fraction, in hparams.yaml next to it).
+    """
     max_epochs = max_epochs_override if max_epochs_override is not None else cfg.max_epochs
 
-    loggers = []
-    if not no_wandb:
-        loggers.append(WandbLogger(
-            entity=cfg.wandb_entity,  # None = personal account; set in YAML for team runs
-            project=cfg.wandb_project,
-            name=f"{cfg.job_id}_{ckpt_prefix}",
-            log_model=False,
-            save_dir=os.environ.get("TMPDIR", "./wandb/wandb_tmp"),
-        ))
-    loggers.append(CSVLogger("runs", name=f"{cfg.job_id}_{ckpt_prefix}"))
+    logger = CSVLogger("runs", name=f"{cfg.job_id}_{ckpt_prefix}")
 
     Path(cfg.output.ckpt_dir).mkdir(parents=True, exist_ok=True)
     checkpoint_cb = ModelCheckpoint(
@@ -204,7 +195,7 @@ def build_trainer(
         # timing, so leaving it on would reintroduce run-to-run drift.
         deterministic=cfg.deterministic,
         benchmark=False,
-        logger=loggers,
+        logger=logger,
         callbacks=[checkpoint_cb, upload_cb],
         log_every_n_steps=2,
     )
@@ -252,7 +243,6 @@ def main() -> None:
     trainer, checkpoint_cb = build_trainer(
         cfg,
         ckpt_prefix=run_info["model"],
-        no_wandb=args.no_wandb,
         max_epochs_override=args.max_epochs,
     )
 

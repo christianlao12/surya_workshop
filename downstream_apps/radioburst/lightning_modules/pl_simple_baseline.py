@@ -48,7 +48,7 @@ class TypeIILightningModule(L.LightningModule):
         Optional ``(batch) -> batch`` applied before every model call, e.g.
         ``destandardize_channels`` for the linear baseline.
     run_info:
-        Extra values recorded with the run (WandB config, hparams.yaml, the checkpoint),
+        Extra values recorded with the run (hparams.yaml and the checkpoint),
         e.g. ``negative_keep_fraction``, which evaluate.py needs to correct the
         probabilities of a model trained on subsampled negatives.
     """
