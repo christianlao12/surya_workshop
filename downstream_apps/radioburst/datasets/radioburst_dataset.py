@@ -1,7 +1,8 @@
 """
 Dataset for 24 h Type II radio-burst forecasting.
 
-Each sample is one Surya frame at an issue time t (00/06/12/18 UTC, see prepare_data.py)
+Each sample is one Surya frame at an issue time t (on each split's grid, see
+prepare_data.CADENCE_H)
 and two yes/no labels:
 
     type2     — a Type II burst starts in (t, t + horizon]
@@ -24,7 +25,7 @@ class TypeIIDataset(HelioNetCDFDataset):
     """HelioNetCDFDataset plus the two Type II labels.
 
     The index CSV already holds exactly the issue times (``prepare_data.py`` writes one
-    frame every 6 h), so the issue time *is* the frame time: no timestamp matching, and the
+    frame per issue time), so the issue time *is* the frame time: no timestamp matching, and the
     input can never come from after the issue time. Only the frame at offset 0 is loaded.
 
     Args:

@@ -38,7 +38,7 @@ data:
   # -- Paths (relative to this file's directory) --
   # The splits are this app's own (see prepare_data.py), not the repo-wide Surya indices:
   # train/val are solar rotations of 2010-2019, test is 2020-2024 (Solar Cycle 25, unseen
-  # by Surya's pretraining). One frame every 6 h.
+  # by Surya's pretraining). One frame every 12 h (train, test) or 24 h (val).
   train_data_path: ../data/splits/train.csv
   valid_data_path: ../data/splits/val.csv
   test_data_path: ../data/splits/test.csv   # evaluate.py only — never used for training
@@ -54,9 +54,9 @@ data:
   ds_events_path: ../data/typeii_events.csv   # one row per onset, from the CDAW DH Type II catalog
   ds_flares_path: ../data/mx_flares.csv       # evaluate.py baseline only
   ds_horizon: 24h                 # positive if an onset falls in (t, t + 24h]; keep in sync with prepare_data.HORIZON
-  ds_negative_ratio: 3            # train only: keep 3 negatives per positive (~2,000 train frames).
-                                  # null keeps all 10,591. val (2,230) and test (7,132) are never
-                                  # subsampled. At ~1 GB/frame, train+val is ~4 TB at 3, ~13 TB at null.
+  ds_negative_ratio: 1            # train only: keep 1 negative per positive (~500 of the 5,350 train
+                                  # frames). val (572) is never subsampled. At ~1 GB/frame the cached
+                                  # train+val set is ~1.1 TB. Test (3,605) is streamed, not cached.
   ds_exclude_behind_limb: false   # true drops samples whose window holds a behind-the-limb onset
 
   # -- Local data (only needed when the index contains relative local paths) --
@@ -90,7 +90,7 @@ data:
   #
   # If none is set and the index contains s3:// paths, the run fails immediately with a
   # suggested path — not part-way through the first epoch. ~ and $ENV_VARS are expanded.
-  s3_cache_dir: /home/jovyan/scratch_space/surya_cache/
+  s3_cache_dir: null
 
   # -- S3 transfer tuning --
   # These control boto3's multipart download: how many threads download parts in

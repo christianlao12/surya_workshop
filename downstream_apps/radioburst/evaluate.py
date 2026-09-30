@@ -4,8 +4,10 @@ Score Type II forecasts on the held-out test split (2020-2024), against referenc
 
 Two steps, so the expensive one runs once:
 
-    # 1. GPU: run a checkpoint over val and test, write calibrated probabilities
-    python -m downstream_apps.radioburst.evaluate predict --checkpoint checkpoints/surya-epoch=07-val_loss=0.2461.ckpt
+    # 1. GPU: run checkpoints over val and test, write calibrated probabilities. Both models
+    #    see each frame in one pass; test frames are deleted from the cache after use.
+    python -m downstream_apps.radioburst.evaluate predict --delete-test-frames \
+        --checkpoint checkpoints/baseline-epoch=05-val_loss=0.6012.ckpt checkpoints/surya-epoch=07-val_loss=0.5461.ckpt
 
     # 2. CPU: score every predictions file in predictions/ plus the reference forecasts
     python -m downstream_apps.radioburst.evaluate score
@@ -21,7 +23,7 @@ What is reported, per forecast and label (on test)
   Positive = better than always forecasting that rate. Probabilistic forecasts only.
 - **ROC-AUC** and **PR-AUC**. Probabilistic forecasts only.
 - A 95% interval for TSS from a **block bootstrap over solar rotations**: resampling rows
-  would treat the ~20 six-hourly rows around each event as independent, and events cluster
+  would treat the several issue times around each event as independent, and events cluster
   in active rotations, so the interval would come out far too narrow.
 - **dTSS vs the M/X-flare baseline**, with a *paired* interval (both forecasts scored on the
   same resampled rotations). This is the headline number: the baseline's own interval is
@@ -206,10 +208,30 @@ def load_model_from_checkpoint(cfg, checkpoint: dict):
     return model.eval(), kind
 
 
-def predict(cfg, checkpoint_path: Path, out_dir: Path, splits=("val", "test"), batch_size: int = 4) -> None:
-    """Write ``<out_dir>/<name>_<split>.csv`` with calibrated probabilities per issue time."""
-    import torch
+def prediction_names(checkpoint_paths, names=None) -> list[str]:
+    """One output name per checkpoint: ``names`` if given, else the checkpoint's prefix
+    (``surya`` or ``baseline``). Duplicates would overwrite each other's files, so they raise."""
+    names = list(names) if names else [Path(p).stem.split("-")[0] for p in checkpoint_paths]
+    if len(names) != len(checkpoint_paths):
+        raise ValueError(f"Got {len(checkpoint_paths)} checkpoints but {len(names)} names.")
+    if len(set(names)) != len(names):
+        raise ValueError(f"Prediction names must be unique, got {names}: pass --name, one per checkpoint.")
+    return names
+
+
+def predict(cfg, checkpoint_paths, out_dir: Path, names=None, splits=("val", "test"),
+            batch_size: int = 4, delete_test_frames: bool = False) -> None:
+    """Write ``<out_dir>/<name>_<split>.csv`` with calibrated probabilities per issue time.
+
+    Every checkpoint is run on each frame as it is loaded, so a frame is downloaded once no
+    matter how many models are compared. With ``delete_test_frames``, each **test** frame's
+    S3 cache copy is deleted after use, so the test set streams through without being
+    stored. Val frames are kept: training re-reads them.
+    """
+    import os
     from functools import partial
+
+    import torch
     from torch.utils.data import DataLoader
 
     from downstream_apps.radioburst.datasets.radioburst_dataset import TypeIIDataset
@@ -217,19 +239,21 @@ def predict(cfg, checkpoint_path: Path, out_dir: Path, splits=("val", "test"), b
     from workshop_infrastructure.datasets.builders import _base_dataset_kwargs
     from workshop_infrastructure.utils import build_scalers
 
-    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    model, kind = load_model_from_checkpoint(cfg, checkpoint)
-    keep_fraction = checkpoint["hyper_parameters"]["negative_keep_fraction"]
+    names = prediction_names(checkpoint_paths, names)
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model.to(device)
-
     scalers = build_scalers(info=cfg.data.scalers_path)
-    preprocess = partial(destandardize_channels, channel_order=cfg.data.channels, scalers=scalers) \
-        if kind == "baseline" else (lambda batch: batch)
+    to_signum_log = partial(destandardize_channels, channel_order=cfg.data.channels, scalers=scalers)
+
+    models = {}  # name -> (model, preprocess, negative_keep_fraction)
+    for name, path in zip(names, checkpoint_paths):
+        checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+        model, kind = load_model_from_checkpoint(cfg, checkpoint)
+        preprocess = to_signum_log if kind == "baseline" else (lambda batch: batch)
+        models[name] = (model.to(device), preprocess, checkpoint["hyper_parameters"]["negative_keep_fraction"])
+        print(f"[PREDICT] {name}: {kind} model from {path}")
+
     paths = {"val": cfg.data.valid_data_path, "test": cfg.data.test_data_path}
     out_dir.mkdir(parents=True, exist_ok=True)
-    name = Path(checkpoint_path).stem.split("-")[0]  # "surya" or "baseline"
-
     for split in splits:
         dataset = TypeIIDataset(
             index_path=paths[split], phase="val",  # never subsampled
@@ -240,17 +264,27 @@ def predict(cfg, checkpoint_path: Path, out_dir: Path, splits=("val", "test"), b
         )
         loader = DataLoader(dataset, batch_size=batch_size, num_workers=cfg.num_workers, shuffle=False,
                             multiprocessing_context="spawn" if cfg.num_workers > 0 else None)
-        times, probs = [], []
+        times, probs = [], {name: [] for name in models}
         with torch.no_grad(), torch.autocast(device_type=device, dtype=torch.bfloat16, enabled=device == "cuda"):
             for batch in loader:
                 batch = {k: v.to(device) if torch.is_tensor(v) else v for k, v in batch.items()}
-                probs.append(torch.sigmoid(model(preprocess(batch)).float()).cpu().numpy())
+                for name, (model, preprocess, _) in models.items():
+                    probs[name].append(torch.sigmoid(model(preprocess(batch)).float()).cpu().numpy())
                 times += list(batch["ds_index"])
-        p = correct_for_subsampling(np.concatenate(probs), keep_fraction)
-        out = pd.DataFrame(p, columns=list(LABELS), index=pd.to_datetime(times))
-        out.index.name = "issue_time"
-        out.to_csv(out_dir / f"{name}_{split}.csv")
-        print(f"[PREDICT] {split}: {len(out):,} issue times -> {out_dir / f'{name}_{split}.csv'}")
+                if delete_test_frames and split == "test":
+                    for t in batch["ds_index"]:
+                        uri = dataset.index.loc[pd.Timestamp(t), "path"]
+                        if dataset._is_s3_path(uri):  # never delete local data, only cache copies
+                            cached = dataset._s3_cache_path(uri)
+                            if os.path.exists(cached):
+                                os.remove(cached)
+
+        for name, (_, _, keep_fraction) in models.items():
+            p = correct_for_subsampling(np.concatenate(probs[name]), keep_fraction)
+            out = pd.DataFrame(p, columns=list(LABELS), index=pd.to_datetime(times))
+            out.index.name = "issue_time"
+            out.to_csv(out_dir / f"{name}_{split}.csv")
+            print(f"[PREDICT] {split}: {len(out):,} issue times -> {out_dir / f'{name}_{split}.csv'}")
 
 
 # --------------------------------------------------------------------------------------
@@ -298,8 +332,13 @@ def main() -> None:
     parser.add_argument("--pred-dir", default=str(DEFAULT_PRED_DIR),
                         help="Where predictions are written/read (default: ./predictions).")
     sub = parser.add_subparsers(dest="command", required=True)
-    p = sub.add_parser("predict", help="GPU: checkpoint -> calibrated val/test probabilities.")
-    p.add_argument("--checkpoint", required=True)
+    p = sub.add_parser("predict", help="GPU: checkpoint(s) -> calibrated val/test probabilities.")
+    p.add_argument("--checkpoint", nargs="+", required=True,
+                   help="One or more checkpoints; all run in the same pass over the frames.")
+    p.add_argument("--name", nargs="+", default=None,
+                   help="Output name per checkpoint (default: its prefix, surya or baseline).")
+    p.add_argument("--delete-test-frames", action="store_true",
+                   help="Delete each test frame's S3 cache copy after use, so test is never stored.")
     p.add_argument("--batch-size", type=int, default=4)
     s = sub.add_parser("score", help="CPU: score predictions and reference forecasts on test.")
     s.add_argument("--n-boot", type=int, default=1000)
@@ -307,7 +346,8 @@ def main() -> None:
 
     cfg = load_radioburst_config(args.config)
     if args.command == "predict":
-        predict(cfg, Path(args.checkpoint), Path(args.pred_dir), batch_size=args.batch_size)
+        predict(cfg, [Path(c) for c in args.checkpoint], Path(args.pred_dir), names=args.name,
+                batch_size=args.batch_size, delete_test_frames=args.delete_test_frames)
     else:
         table = score(cfg, Path(args.pred_dir), n_boot=args.n_boot)
         with pd.option_context("display.width", 160, "display.float_format", "{:.3f}".format):

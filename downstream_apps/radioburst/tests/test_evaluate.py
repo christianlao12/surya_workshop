@@ -121,6 +121,21 @@ def test_reference_forecasts_look_only_at_the_past(tmp_path):
 # Checkpoint reloading (needs torch + peft: runs on the training machine)
 # --------------------------------------------------------------------------------------
 
+def test_prediction_names_default_to_the_checkpoint_prefix():
+    paths = ["ckpt/baseline-epoch=03-val_loss=0.6.ckpt", "ckpt/surya-epoch=07-val_loss=0.5.ckpt"]
+    assert ev.prediction_names(paths) == ["baseline", "surya"]
+
+
+def test_prediction_names_must_not_collide():
+    """Two Surya runs would both default to "surya" and overwrite each other's files."""
+    paths = ["a/surya-epoch=01-val_loss=0.5.ckpt", "b/surya-epoch=02-val_loss=0.4.ckpt"]
+    with pytest.raises(ValueError, match="unique"):
+        ev.prediction_names(paths)
+    assert ev.prediction_names(paths, ["lora_r4", "lora_r8"]) == ["lora_r4", "lora_r8"]
+    with pytest.raises(ValueError, match="names"):
+        ev.prediction_names(paths, ["only_one"])
+
+
 def test_strip_lightning_prefix_keeps_only_model_weights():
     state = {"model.base_model.w": 1, "model.head_unembed.b": 2, "val_scores.x": 3}
     assert ev.strip_lightning_prefix(state) == {"base_model.w": 1, "head_unembed.b": 2}

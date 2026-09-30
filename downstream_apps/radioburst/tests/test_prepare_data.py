@@ -64,17 +64,28 @@ def test_every_fifth_rotation_is_validation():
 
 @pytest.fixture
 def splits(tmp_path):
-    t = pd.date_range("2019-11-01", "2020-01-10", freq="12min")
+    t = pd.date_range("2019-06-01", "2020-01-10", freq="12min")  # long enough to hold a val rotation
     index = pd.DataFrame({"path": [f"s3://b/{i}.nc" for i in range(len(t))], "timestep": t, "present": 1})
-    index.loc[index.timestep == pd.Timestamp("2019-11-05 06:00"), "present"] = 0
     index.to_csv(tmp_path / "full.csv")  # the real full index has an unnamed index column too
     return pdata.build_splits(tmp_path / "full.csv")
 
 
-def test_only_present_frames_on_the_six_hour_grid_are_kept(splits):
-    kept = pd.to_datetime(pd.concat(splits.values())["timestep"])
-    assert ((kept.dt.minute == 0) & (kept.dt.hour % 6 == 0)).all()
-    assert pd.Timestamp("2019-11-05 06:00") not in set(kept)  # present == 0
+def test_each_split_keeps_only_its_own_issue_time_grid(splits):
+    for name, df in splits.items():
+        kept = pd.to_datetime(df["timestep"])
+        assert len(kept) > 0, name
+        assert ((kept.dt.minute == 0) & (kept.dt.hour % pdata.CADENCE_H[name] == 0)).all(), name
+
+
+def test_missing_frames_are_dropped_not_replaced(tmp_path):
+    t = pd.date_range("2015-01-01", "2015-03-01", freq="12min")
+    index = pd.DataFrame({"path": "s3://b/x.nc", "timestep": t, "present": 1})
+    missing = pd.Timestamp("2015-02-01 00:00")  # on every split's grid
+    index.loc[index.timestep == missing, "present"] = 0
+    index.to_csv(tmp_path / "full.csv")
+    kept = pd.to_datetime(pd.concat(pdata.build_splits(tmp_path / "full.csv").values())["timestep"])
+    assert missing not in set(kept)
+    assert missing + pd.Timedelta("12min") not in set(kept)  # no neighbour stands in for it
 
 
 def test_output_columns_match_what_the_dataset_reads(splits):

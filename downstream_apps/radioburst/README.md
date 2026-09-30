@@ -7,23 +7,27 @@ one (ending below 1 MHz, i.e. the shock survived into the solar wind) does?
 Type II bursts are the radio signature of CME-driven shocks. Interplanetary-reaching ones
 accompany most large solar energetic particle (SEP) events, which is the operational
 motivation: a 24 h "shock-driving eruption likely" signal is an input to SEP all-clear
-forecasting. Forecasts are issued every 6 h (00/06/12/18 UTC).
+forecasting. Issue times are every 12 h in train and test (00/12 UTC) and daily in val,
+sized for a ~1 TB frame cache (see *Storage* below).
 
 Built from `downstream_apps/template/` — see its `ADAPTING.md` for the general pattern.
 
 ## Quick start (from the repo root)
 
 ```bash
+# Where SDO frames are cached on this machine (~1 TB free; see Storage below)
+export SURYA_WS_CACHE_DIR=/scratch/$USER/helio_s3_cache
+
 # 0. Data files (already committed; rerun only to rebuild them)
 python -m downstream_apps.radioburst.prepare_data                  # add --fetch-flares to refresh mx_flares.csv
 
-# 1. Train (set data.max_samples: 10 in the YAML for a sanity run)
+# 1. Train (set data.max_samples: 10 in the YAML for a sanity run). Both use the same cached frames.
 CUDA_VISIBLE_DEVICES=0 python -m downstream_apps.radioburst.3_finetune_template_1D --train_baseline
 CUDA_VISIBLE_DEVICES=0,1 python -m downstream_apps.radioburst.3_finetune_template_1D
 
-# 2. Predict on val + test (GPU), then score (CPU)
-python -m downstream_apps.radioburst.evaluate predict --checkpoint checkpoints/baseline-....ckpt
-python -m downstream_apps.radioburst.evaluate predict --checkpoint checkpoints/surya-....ckpt
+# 2. Predict on val + test with both models in one pass (GPU), then score (CPU)
+python -m downstream_apps.radioburst.evaluate predict --delete-test-frames \
+    --checkpoint checkpoints/baseline-....ckpt checkpoints/surya-....ckpt
 python -m downstream_apps.radioburst.evaluate score
 
 # Tests (CPU, seconds)
@@ -57,9 +61,26 @@ and 2022.
 
 | Split | Issue times | P(Type II 24 h) | P(IP Type II 24 h) |
 |---|---|---|---|
-| train | 10,591 | 4.7% | 3.1% |
-| val | 2,230 | 5.3% | 2.6% |
-| test | 7,132 | 8.8% | 2.8% |
+| train | 5,350 (≈500 used at `ds_negative_ratio: 1`) | 4.7% | 3.1% |
+| val | 572 | 5.1% | 2.4% |
+| test | 3,605 | 8.9% | 2.8% |
+
+**Storage.** Each SDO frame is ~1 GB, cached in `SURYA_WS_CACHE_DIR` (or `--s3-cache-dir`)
+as one flat file per timestep, never inside the repo, never deleted automatically. Only data
+read more than once is kept:
+
+| Split | Issue times | Frames on disk | ≈ Size |
+|---|---|---|---|
+| train (12-hourly, 1 negative per positive) | 5,350 | ~500 | ~0.5 TB |
+| val (daily) | 572 | 572 | ~0.6 TB |
+| test (12-hourly) | 3,605 | 0 — streamed, deleted after use | 0 (≈3.6 TB downloaded) |
+
+The baseline and LoRA train on the same cached frames. `evaluate predict` runs every
+checkpoint on each test frame in one pass, so the test set is downloaded once. The spacing
+per split is `CADENCE_H` in `prepare_data.py`; neighbouring issue times share most of their
+24 h window, so sparser spacing loses little. With more disk, lower the spacing or raise
+`ds_negative_ratio`. LoRA rank (`model.lora_config.r`, 4 here) costs no extra storage;
+with ~250 positives keep it small.
 
 **Imbalance** is handled by keeping `ds_negative_ratio` negatives per positive in train only,
 not by `pos_weight`. Every dropped row is negative for both labels, so multiplying the
@@ -77,15 +98,15 @@ cluster (187 test onsets fall in only ~43 rotations).
 
 | Reference forecast (test, 2020–2024) | TSS, Type II | TSS, IP Type II |
 |---|---|---|
-| Persistence (a Type II in the past 24 h) | 0.13 [0.05, 0.19] | 0.07 [−0.01, 0.15] |
-| **M/X flare in the past 24 h** | **0.29 [0.18, 0.39]** | **0.30 [0.12, 0.45]** |
+| Persistence (a Type II in the past 24 h) | 0.13 [0.04, 0.20] | 0.06 [−0.01, 0.14] |
+| **M/X flare in the past 24 h** | **0.29 [0.19, 0.39]** | **0.32 [0.14, 0.46]** |
 
 The M/X-flare baseline costs one line. Surya is useful here only if its TSS minus the
 baseline's has a paired interval above zero (`dtss_ci_low > 0` in `evaluate.py score`).
 
 ## Limitations
 
-- **Effective sample size** is ~43 test rotations with events, not 7,132 rows.
+- **Effective sample size** is ~43 test rotations with events, not 3,605 rows.
 - **Base-rate shift**: cycle 25 has about twice cycle 24's Type II rate, so probabilities
   learned on 2010–2019 run low on the test years. TSS/AUC are unaffected; Brier skill and
   reliability are not.

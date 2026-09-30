@@ -16,7 +16,8 @@ Everything lands in ``downstream_apps/radioburst/data/``:
     mx_flares.csv            M/X flare start times (SSW Latest Events, via HEK). Used only by
                              the "M/X flare in the last 24 h" baseline in evaluate.py.
     splits/{train,val,test}.csv
-                             Surya index rows at the issue times: one frame every 6 h.
+                             Surya index rows at the issue times: one frame every 12 h
+                             (train, test) or 24 h (val); see CADENCE_H.
 
 The splits
 ----------
@@ -56,7 +57,11 @@ END = pd.Timestamp("2025-01-01")      # catalog assumed complete up to here
 TEST_START = pd.Timestamp("2020-01-01")
 ROTATION = pd.Timedelta(days=27.2753)  # synodic Carrington rotation
 VAL_EVERY = 5                          # every 5th rotation of the train period is val
-CADENCE_H = 6                          # issue times at 00, 06, 12, 18 UTC
+# Hours between issue times, per split (issue times fall on multiples of this, UTC). Sized
+# for a ~1 TB frame cache: train and val frames are cached and re-read every epoch, test
+# frames are read once (streamed by evaluate.py). Neighbouring issue times share most of
+# their 24 h label window, so sparser val/test issue times lose little information.
+CADENCE_H = {"train": 12, "val": 24, "test": 12}
 HORIZON = pd.Timedelta(hours=24)       # label window; must match data.ds_horizon
 GAP = pd.Timedelta(days=2)             # buffer around every split boundary
 IP_THRESHOLD_KHZ = 1000                # ending below 1 MHz = shock reached interplanetary space
@@ -104,23 +109,26 @@ def assign_split(t: pd.DatetimeIndex) -> np.ndarray:
 def build_splits(full_index_csv: Path) -> dict[str, pd.DataFrame]:
     """Surya index rows at the issue times, grouped by split, with the boundary gap applied.
 
-    Issue times are the frames at 00/06/12/18 UTC that are present. A missing frame drops
-    that issue time rather than being replaced by a neighbour, so the input is never later
-    than the issue time.
+    Issue times are the present frames on each split's ``CADENCE_H`` grid (on the hour, at
+    hours divisible by the cadence). A missing frame drops that issue time rather than being
+    replaced by a neighbour, so the input is never later than the issue time.
     """
     index = pd.read_csv(full_index_csv, usecols=["path", "timestep", "present"])
     index["timestep"] = pd.to_datetime(index["timestep"])
     t = index["timestep"]
-    on_grid = (t.dt.minute == 0) & (t.dt.hour % CADENCE_H == 0)
     in_period = (t >= START) & (t + HORIZON <= END)  # the label window must be fully labelled
-    index = index[on_grid & in_period & (index["present"] == 1)].reset_index(drop=True)
+    index = index[(t.dt.minute == 0) & in_period & (index["present"] == 1)].reset_index(drop=True)
 
     t = pd.DatetimeIndex(index["timestep"])
     split = assign_split(t)
     # Blocks are much longer than 2 * GAP, so checking both edges covers the whole window.
     clean = (assign_split(t - GAP) == split) & (assign_split(t + GAP) == split)
     index["timestep"] = index["timestep"].dt.strftime("%Y-%m-%d %H:%M:%S")
-    return {name: index[clean & (split == name)] for name in ("train", "val", "test")}
+    splits = {}
+    for name, hours in CADENCE_H.items():
+        on_grid = (t.hour % hours == 0)
+        splits[name] = index[clean & (split == name) & on_grid]
+    return splits
 
 
 # --------------------------------------------------------------------------------------
