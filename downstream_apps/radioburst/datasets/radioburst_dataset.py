@@ -65,8 +65,14 @@ class TypeIIDataset(HelioNetCDFDataset):
             hidden = onset_in_window(events.loc[events.behind_limb == 1, "onset"], issue, ds_horizon)
             labels = labels[~hidden]
 
+        # Fraction of negatives kept. Subsampling inflates predicted probabilities; since
+        # every dropped row is negative for *both* labels, multiplying the predicted odds by
+        # this fraction undoes it exactly for both outputs (see evaluate.py).
+        self.negative_keep_fraction = 1.0
         if ds_negative_ratio is not None and self.phase == "train":
+            n_negatives = int((labels["type2"] == 0).sum())
             labels = self._subsample_negatives(labels, ds_negative_ratio, subsample_seed)
+            self.negative_keep_fraction = int((labels["type2"] == 0).sum()) / max(n_negatives, 1)
 
         if max_number_of_samples is not None:
             labels = labels.iloc[:max_number_of_samples]

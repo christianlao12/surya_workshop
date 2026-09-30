@@ -85,6 +85,10 @@ def test_negative_subsampling_keeps_all_positives_and_the_ratio(tmp_path):
     # The same seed keeps the same negatives.
     again = make_dataset(*files, ds_negative_ratio=1, subsample_seed=0)
     assert sub.labels.index.equals(again.labels.index)
+    # The kept fraction is recorded, for the probability correction at evaluation.
+    n_neg = int((full.labels["type2"] == 0).sum())
+    assert sub.negative_keep_fraction == pytest.approx(n_pos / n_neg)
+    assert full.negative_keep_fraction == 1.0
 
 
 def test_validation_is_never_subsampled(tmp_path):

@@ -1,10 +1,15 @@
 """
-A simple linear regression model to be used as a baseline for radio burst forecasting.
+A linear baseline for Type II forecasting: per-channel image statistics -> two logits.
+
+The fine-tuned Surya model has to beat this to show that the backbone adds anything
+beyond "how bright / how magnetically active is the disk right now".
 """
 
 import torch
 import torch.nn as nn
 from einops import rearrange
+
+from downstream_apps.radioburst.labels import LABELS
 
 
 def destandardize_channels(batch: dict, channel_order: list, scalers: dict) -> dict:
@@ -35,75 +40,27 @@ def destandardize_channels(batch: dict, channel_order: list, scalers: dict) -> d
     return {**batch, "ts": x}
 
 
-class TwoStageBurstModel(nn.Module):
+class LinearTypeIIModel(nn.Module):
+    """One linear layer on the spatial mean and standard deviation of every channel.
+
+    Expects ``batch["ts"]`` in **signum-log** space (pass ``destandardize_channels`` as
+    the Lightning module's ``preprocess_fn``).
+
+    Args:
+        input_dim: ``2 * C * T`` — a mean and a std per channel and input timestep.
+
+    Returns (from ``forward``):
+        Logits of shape ``(B, 2)``, in ``LABELS`` order — the same contract as
+        ``HelioSpectformer1D`` with ``num_outputs=2``, so both models share one loss.
+    """
+
     def __init__(self, input_dim: int):
-        """
-        Initializes the TwoStageBurstModel.
-
-        Args:
-            input_dim (int): The size of the input vector after channel and time dimensions are
-                flattened. Since forward() concatenates spatial mean and std per channel/timestep,
-                this should equal 2 * C * T.
-
-        Note:
-            This model expects 'ts' in the batch dict to already be in **signum-log** space
-            (channel z-scores undone, log compression retained). Use
-            destandardize_channels() to pre-process normalized SDO inputs before passing
-            them here (e.g., via the preprocess_fn argument of RadioBurstLightningModule).
-
-        The model no longer holds a copy of the median burst-spectrogram template. It used
-        to (as a peak-normalized buffer it multiplied its amplitude prediction by), but
-        once ``peak_amp`` is trained in ``SpectraTemplateNormalizer``'s standardized space
-        (see ``spectra_transform.py``) that template relationship lives entirely inside
-        the normalizer: this model's own generative assumption,
-        ``spectra ≈ peak_amp · (template / template.max())``, collapses to
-        ``standardized_peak_amp`` being *constant* across (t, f) once the template is
-        divided out in log space, so reconstructing a full spectrogram is just
-        broadcasting the scalar and letting ``SpectraTemplateNormalizer.inverse()`` add
-        the template shape back — see that module's docstring for the derivation.
-        """
         super().__init__()
-        self.classifier = nn.Linear(input_dim, 1)
-        self.amplitude_regressor = nn.Linear(input_dim, 1)
+        self.linear = nn.Linear(input_dim, len(LABELS))
 
-    def forward(self, x: dict) -> dict:
-        """
-        Performs a forward pass through the model.
-
-        Args:
-            x (dict): Batch dict with 'ts' of shape (B, C, T, H, W) in signum-log space.
-
-        B - Batch size
-        C - Channels
-        T - Time steps
-        H - Height
-        W - Width
-
-        Returns:
-            dict with:
-                "burst_prob" (B, 1): sigmoid burst classification.
-                "peak_amp" (B, 1): regressed amplitude, in ``SpectraTemplateNormalizer``'s
-                    standardized space — the same space the ``"spectra"`` target from
-                    ``RadioBurstDSDataset`` is in.
-                "spectra" (B, 1, 1): ``peak_amp`` broadcast to a flat field. Pass it through
-                    ``SpectraTemplateNormalizer.inverse()`` to reconstruct the full
-                    ``(T, F)`` raw-flux spectrogram (the template shape is added back
-                    there, not here).
-        """
-        x = x["ts"]
-
-        # Collapse input stack spatially into per-channel/timestep mean and std. Signed mean is
-        # kept (rather than abs()) since sign is physically meaningful for HMI polarity; std
-        # captures spatial variability that a mean-only summary would discard.
-        mean = x.mean(dim=[3, 4])
-        std = x.std(dim=[3, 4])
-        x = torch.cat([mean, std], dim=1)
-
-        # Rearrange in preparation for linear layer
-        x = rearrange(x, "b c t -> b (c t)")
-
-        burst_prob = torch.sigmoid(self.classifier(x))
-        peak_amp = self.amplitude_regressor(x)
-        spectra = peak_amp.unsqueeze(-1)
-
-        return {"burst_prob": burst_prob, "peak_amp": peak_amp, "spectra": spectra}
+    def forward(self, batch: dict) -> torch.Tensor:
+        x = batch["ts"]  # (B, C, T, H, W)
+        # The signed mean is kept (sign matters for HMI polarity); the std captures the
+        # spatial structure a mean alone would discard.
+        features = torch.cat([x.mean(dim=(3, 4)), x.std(dim=(3, 4))], dim=1)  # (B, 2C, T)
+        return self.linear(rearrange(features, "b c t -> b (c t)"))

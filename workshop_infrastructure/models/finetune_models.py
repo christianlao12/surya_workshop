@@ -162,9 +162,11 @@ class HelioSpectformer1D(nn.Module):
     def forward_features(self, batch) -> torch.Tensor:
         """Run the backbone and pool it down to one ``(B, embed_dim)`` vector per sample.
 
-        Split out from ``forward`` so a task needing several outputs can project this
-        embedding more than once -- see ``HelioSpectformerBurst`` in the radioburst app --
-        rather than packing them into ``head_unembed`` and slicing the result apart.
+        Split out from ``forward`` so a task needing several *differently shaped* outputs
+        (say, a logit and a spectrogram) can project this embedding once per output with
+        its own ``head_*`` layer, rather than packing them into ``head_unembed`` and
+        slicing the result apart. Outputs of the same kind, such as several logits, fit
+        in ``head_unembed`` via ``num_outputs``.
         """
         if self.pooling == "class_token":
             # (1, 1, D) -- forward_with_cls_token expands it over the batch itself.
